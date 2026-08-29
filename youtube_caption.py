@@ -30,6 +30,13 @@ DEFAULT_LANGUAGES = ["zh-Hans", "zh-Hant", "zh.*", "en.*", "en"]
 SERVER_STATE_FILE = ".youtube-caption-server.json"
 EVENT_FORMAT = "text"
 
+# Windows console and pipe encodings depend on the machine locale.  Desktop
+# builds exchange Chinese JSONL messages with the GUI, so make that protocol
+# explicitly UTF-8 instead of relying on cp1252/GBK defaults.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def emit_event(event, message="", level="info", **data):
     """Emit stable JSONL for desktop apps while preserving readable CLI logs."""
@@ -56,7 +63,7 @@ def run_json(args):
     extra_paths = ["/opt/homebrew/bin", "/usr/local/bin"]
     env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
     try:
-        result = subprocess.run(command, check=True, text=True, capture_output=True, env=env)
+        result = subprocess.run(command, check=True, text=True, encoding="utf-8", errors="replace", capture_output=True, env=env)
         return json.loads(result.stdout)
     except FileNotFoundError:
         raise SystemExit("找不到 yt-dlp。请重新安装完整版本，或在命令行环境中安装 yt-dlp。")
