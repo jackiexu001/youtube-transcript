@@ -1,0 +1,28 @@
+name: Build Windows installer
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --yes --no-progress
+      - name: Build application and installer
+        shell: powershell
+        run: .\build_windows_exe.ps1
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-Caption-Archive-Windows-x64
+          path: |
+            release/windows/*-Setup.exe
+            release/windows/*-Setup.exe.sha256
+          if-no-files-found: error

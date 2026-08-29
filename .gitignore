@@ -1,0 +1,32 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+.build/
+release/
+checkpoints/
+*.spec
+*.app/
+
+# Local user configuration and generated archives
+channels.json
+archive/
+.youtube-caption-channel-url.txt
+*/.caption-archive.json
+*/videos.csv
+*/*.html
+*/打开*字幕.command
+*/打开*字幕.bat
+index.html
+更新频道字幕.command
+更新频道字幕.bat
+!开始抓取 YouTube 字幕.command
+!开始抓取 YouTube 字幕.bat
+
+# Existing local sample/archive folders should not be committed by default.
+Alan Chen/
+Nico 前沿 Alpha/
+Nico投资有道/
