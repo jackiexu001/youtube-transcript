@@ -1,4 +1,4 @@
-# YouTube Caption Archive
+# youtube-transcript
 
 把 YouTube 频道的视频列表、字幕和基础互动数据整理成本地 HTML 档案：左边播放 YouTube 视频，右边阅读逐字字幕；没有 YouTube 字幕时，可使用 Groq 或 OpenAI 的 Whisper 服务自动生成带时间轴的 AI 字幕，支持中文、英语等 99+ 种语言。
 
@@ -226,8 +226,6 @@ archive/
 请使用这个项目抓取 https://www.youtube.com/@handle 的全部视频列表和字幕。
 默认不要下载视频，输出到 archive，生成 HTML 页面、频道列表、videos.csv，并使用增量更新。
 ```
-
-如果你的助手支持 skill，可以把 `skills/youtube-caption-archive/SKILL.md` 安装到对应的 skills 目录中。
 
 ## 许可
 
