@@ -1,0 +1,11 @@
+{
+  "channels": [
+    {
+      "url": "https://www.youtube.com/@handle",
+      "batch_size": 50,
+      "delay_seconds": 2,
+      "timezone": "Asia/Shanghai",
+      "languages": ["zh-Hans", "zh-Hant", "zh.*", "en.*", "en"]
+    }
+  ]
+}

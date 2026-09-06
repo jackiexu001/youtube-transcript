@@ -1,6 +1,6 @@
 # YouTube Caption Archive
 
-把 YouTube 频道的视频列表、字幕和基础互动数据整理成本地 HTML 档案：左边播放 YouTube 视频，右边阅读逐字字幕；没有字幕的视频也会生成可播放页面。
+把 YouTube 频道的视频列表、字幕和基础互动数据整理成本地 HTML 档案：左边播放 YouTube 视频，右边阅读逐字字幕；没有 YouTube 字幕时，可使用 Groq 或 OpenAI 的 Whisper 服务自动生成带时间轴的 AI 字幕，支持中文、英语等 99+ 种语言。
 
 这个工具不会下载视频文件，也不会长期保存音频、SRT、VTT、TXT 等中间文件。它只保存本地 HTML、一个很小的增量状态文件和可选 CSV 列表。
 
@@ -8,6 +8,8 @@
 
 - 抓取 YouTube 频道历史视频列表。
 - 优先使用人工字幕，其次使用 YouTube 自动字幕。
+- 没有 YouTube 字幕时，可自动提取低码率纯音频并调用 Groq 或 OpenAI Whisper 生成 AI 字幕，支持中文、英语等 99+ 种语言并自动识别语种。
+- 长视频采用自适应切片、并行识别、音频源自动切换和断点续传；临时音频完成后自动删除。
 - 每个频道生成一个 `index.html` 列表页。
 - 每个视频生成一个单独 HTML 页面。
 - 点击字幕时间戳，视频跳转到对应时间。
@@ -15,6 +17,11 @@
 - 显示发布时间、观看数、点赞数、评论数。
 - 生成 `videos.csv`，方便在 Excel、Numbers、Google Sheets 中打开。
 - 增量更新：已归档视频自动跳过。
+- 启动任务前检查 YouTube 连接，并区分超时、DNS、TLS、代理、限流、登录验证、地区限制、私密视频和视频失效。
+- 临时网络错误自动限次重试；不会无限停在“正在读取”。
+- 失败视频写入待重试队列，下次运行同一频道时优先处理，不重复抓取已成功视频。
+- 检测到限流、登录验证或连续网络失败时自动暂停频道，避免继续增加请求压力。
+- 默认读取 macOS/Windows 系统代理，也支持在应用内填写手动 HTTP/HTTPS/SOCKS 代理地址。
 - macOS 原生 `.app` 和 Windows 图形应用：直接输入频道、数量并查看实时进度与左对齐运行日志，不打开命令窗口；任务支持暂停、继续和停止。
 - 支持中文频道名以及浏览器复制出来的 `%E6...` 编码链接。
 - 可选择并记住档案保存位置；升级应用不会覆盖已有数据。
@@ -23,13 +30,13 @@
 
 ## 安装
 
-macOS 普通用户下载 DMG 后，把“开始抓取 YouTube 字幕”拖入“应用程序”即可。发布版已内置独立后端和 yt-dlp，不需要安装 Python、Homebrew 或使用 Terminal。
+macOS 普通用户下载 DMG 后，把“YouTube Transcript”拖入“应用程序”即可。发布版已内置独立后端、yt-dlp 和 FFmpeg，不需要安装 Python、Homebrew 或使用 Terminal。
 
 DMG 使用传统 Mac 安装布局：左侧是应用，右侧 `Applications` 是系统“应用程序”目录的快捷方式。将左侧应用拖到右侧即完成安装。首次从“应用程序”启动后，应用会提醒用户推出安装磁盘并删除下载的 DMG；不会自动删除用户文件。
 
 因为当前免费版本没有 Apple Developer 公证，首次启动可能被 Gatekeeper 阻止。请在 Finder 中按住 Control 点击应用并选择“打开”；如果仍被阻止，进入“系统设置 → 隐私与安全性”，在底部选择“仍要打开”。不需要输入任何终端命令。
 
-直接运行源码的开发者才需要 Python 3 和 `yt-dlp`。当前功能不下载视频文件，也不需要 `ffmpeg`。
+直接运行源码的开发者才需要 Python 3、`yt-dlp` 和 FFmpeg。应用不会下载或保存视频文件；AI 字幕只临时处理纯音频，完成或失败后都会自动清理。
 
 ## 最快用法
 
@@ -37,10 +44,14 @@ DMG 使用传统 Mac 安装布局：左侧是应用，右侧 `Applications` 是�
 
 如果你不想输入命令：
 
-- macOS：双击 `开始抓取 YouTube 字幕.app`。它是原生 macOS 界面，让你粘贴频道地址、设置本次数量、选择档案位置，并实时显示抓取进度；抓取过程中可以暂停、继续或停止，不会打开 Terminal。
-- Windows：从网站下载 `YouTube-Caption-Archive-2.1.1-Windows-x64-Setup.exe`，按安装向导完成安装，再从开始菜单打开“YouTube 字幕抓取”。不需要另装 Python 或 yt-dlp。
+- macOS：双击 `YouTube Transcript.app`。它是原生 macOS 界面，让你粘贴频道地址、设置本次数量、选择档案位置，并实时显示抓取进度；抓取过程中可以暂停、继续或停止，不会打开 Terminal。
+- Windows：从网站下载 `YouTube-Transcript-2.3.0-Windows-x64-Setup.exe`，按安装向导完成安装，再从开始菜单打开“YouTube Transcript”。不需要另装 Python、yt-dlp 或 FFmpeg。
 
 然后粘贴 YouTube 博主主页链接，例如 `https://www.youtube.com/@handle`。首次运行默认保存到“文稿/YouTube 字幕学习档案”，也可以在应用里选择已有档案目录；抓完后会打开刚处理的博主页面。
+
+如果启用“无 YouTube 字幕时自动生成 AI 字幕”，可选择 Groq（默认、速度优先）或 OpenAI Whisper，并粘贴对应 API Key。两者均支持中文、英语等 99+ 种语言并自动识别语种。界面的“获取 API Key”会打开服务商官方平台。不同服务的 Key 分开加密保存，不会写入字幕档案或运行日志。若只想保存 YouTube 自带字幕和无字幕播放页，可以取消勾选该功能。
+
+“网络代理”通常留空即可，应用会自动读取系统设置。如果浏览器可以打开 YouTube、应用却无法读取频道，可以填写代理软件显示的本机代理地址，例如 `http://127.0.0.1:端口`。包含账号密码的代理不会被应用记住，日志也会隐藏认证信息。
 
 如果这个博主以前已经抓过，再次输入同一个博主主页即可继续。程序会自动跳过已完成的视频，继续抓更早的视频。
 
@@ -84,7 +95,7 @@ py -3 youtube_caption.py --channel "https://www.youtube.com/@handle" --output ar
 ./macos/build_release_macos.sh
 ```
 
-发布构建同时支持 Apple Silicon 与 Intel Mac，并内置后端与 yt-dlp。产物位于 `release/`，同时生成 SHA-256 校验文件。构建机需要一次性准备项目内的 PyInstaller、dmgbuild 环境和官方 `yt-dlp_macos`；普通用户不需要这些工具。dmgbuild 负责稳定写入品牌背景、图标坐标、固定窗口和隐藏工具栏等 DMG 布局元数据。
+发布构建同时支持 Apple Silicon 与 Intel Mac，并内置后端、yt-dlp 与从 FFmpeg 官方固定版本源码构建的 LGPL 通用音频组件。产物位于 `release/`，同时生成 SHA-256 校验文件。构建机需要一次性准备项目内的 PyInstaller、dmgbuild 环境和官方 `yt-dlp_macos`；缺少 FFmpeg 时脚本会校验官方源码后自动构建。普通用户不需要这些工具。
 
 查看档案时直接打开主应用并点击“打开结果”。
 
@@ -133,8 +144,8 @@ python3 youtube_caption.py --config channels.json --output archive
 脚本会创建隔离环境、下载官方 `yt-dlp.exe`，分别打包无窗口图形应用和后端，并生成标准安装程序及 SHA-256：
 
 ```text
-release\windows\YouTube-Caption-Archive-2.1.1-Windows-x64-Setup.exe
-release\windows\YouTube-Caption-Archive-2.1.1-Windows-x64-Setup.exe.sha256
+release\windows\YouTube-Transcript-2.3.0-Windows-x64-Setup.exe
+release\windows\YouTube-Transcript-2.3.0-Windows-x64-Setup.exe.sha256
 ```
 
 也可以把代码推送到 GitHub 后，手动运行 `Build Windows installer` 工作流，在构建产物中下载相同的安装包。PyInstaller 不支持在 macOS 上直接生成 Windows 可执行文件，因此最后的 EXE 必须由 Windows 构建机或 Windows GitHub Actions 生成。
@@ -174,10 +185,26 @@ archive/
     ├── index.html
     ├── videos.csv
     ├── .caption-archive.json
+    ├── .caption-retry.json（仅在存在待重试视频时出现）
+    ├── .ai-checkpoints/（AI 任务中断时保留，成功后自动清理）
+    ├── .ai-reports/（AI 处理耗时与模型信息，不含音频和 Key）
     └── 2026-08-21_videoId.html
 ```
 
 `.caption-archive.json` 是增量状态文件，请保留。它不是视频或字幕中间文件。
+
+`.caption-retry.json` 保存失败视频的编号、错误类型和重试次数，不包含视频、音频、字幕或密码。网络恢复后再次运行同一频道，程序会优先重试；全部成功后该文件自动删除。
+
+`.ai-checkpoints` 只保存已经成功返回的分段识别结果，用于断点续传；不保存音频或 API Key。整条视频完成后对应检查点会自动删除。
+
+## 网络异常时会发生什么
+
+- 浏览器也无法打开 YouTube：应用会限次重试并清楚提示，现有档案不受影响。
+- 浏览器能打开但应用失败：先确认系统代理已启用；仍失败时在“网络代理”填写本机代理地址。
+- YouTube 提示 429：应用立即停止当前频道并保存进度，建议等待 30–60 分钟。
+- YouTube 要求登录或机器人验证：应用不会提高请求频率，也不会尝试绕过验证。
+- 单个视频私密、删除或受地区限制：只把该条加入待重试队列，其余视频继续处理。
+- 连续三条视频发生连接类错误：应用暂停频道，避免在断网状态下不断请求。
 
 ## 为什么需要启动器打开
 

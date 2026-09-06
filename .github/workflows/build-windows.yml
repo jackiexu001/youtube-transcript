@@ -12,6 +12,11 @@ jobs:
         with:
           python-version: "3.11"
           architecture: "x64"
+      - name: Run Python regression tests
+        shell: powershell
+        run: |
+          python -m unittest -v test_youtube_caption.py
+          python -m unittest discover -s mvp -p "test_*.py" -v
       - name: Install Inno Setup
         shell: powershell
         run: choco install innosetup --yes --no-progress
@@ -26,19 +31,21 @@ jobs:
           $installDir = Join-Path $env:RUNNER_TEMP "YouTubeCaptionArchive"
           $install = Start-Process $installer.FullName -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "Silent installation failed with exit code $($install.ExitCode)." }
-          @("YouTube Caption Archive.exe", "youtube-caption-backend.exe", "yt-dlp.exe") | ForEach-Object {
+          @("YouTube Transcript.exe", "youtube-caption-backend.exe", "yt-dlp.exe", "ffmpeg.exe") | ForEach-Object {
             if (-not (Test-Path (Join-Path $installDir $_))) { throw "Installed file missing: $_" }
           }
+          $encoders = & (Join-Path $installDir "ffmpeg.exe") -hide_banner -encoders 2>&1
+          if (-not ($encoders -match "\saac\s")) { throw "Installed FFmpeg is missing the AAC encoder." }
           & (Join-Path $installDir "youtube-caption-backend.exe") --help
           if ($LASTEXITCODE -ne 0) { throw "Installed backend failed to start." }
-          $app = Start-Process (Join-Path $installDir "YouTube Caption Archive.exe") -PassThru
+          $app = Start-Process (Join-Path $installDir "YouTube Transcript.exe") -PassThru
           Start-Sleep -Seconds 5
           if ($app.HasExited) { throw "Installed desktop application exited during startup." }
           Stop-Process -Id $app.Id -Force
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: YouTube-Caption-Archive-Windows-x64
+          name: YouTube-Transcript-Windows-x64
           path: |
             release/windows/*-Setup.exe
             release/windows/*-Setup.exe.sha256

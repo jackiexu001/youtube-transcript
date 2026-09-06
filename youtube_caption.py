@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import urllib.parse
 import csv
@@ -29,6 +30,19 @@ DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_LANGUAGES = ["zh-Hans", "zh-Hant", "zh.*", "en.*", "en"]
 SERVER_STATE_FILE = ".youtube-caption-server.json"
 EVENT_FORMAT = "text"
+YTDLP_SOCKET_TIMEOUT_SECONDS = 15
+YTDLP_TOTAL_TIMEOUT_SECONDS = 75
+YTDLP_ATTEMPTS = 2
+ACTIVE_PROXY = None
+
+
+class ArchiveRequestError(RuntimeError):
+    def __init__(self, code, message, detail="", retryable=False):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.detail = detail
+        self.retryable = retryable
 
 # Windows console and pipe encodings depend on the machine locale.  Desktop
 # builds exchange Chinese JSONL messages with the GUI, so make that protocol
@@ -48,7 +62,44 @@ def emit_event(event, message="", level="info", **data):
     print(message, file=stream, flush=True)
 
 
-def run_json(args):
+def redact_secrets(value):
+    text = str(value or "")
+    text = re.sub(r"(https?://)[^/@\s:]+:[^/@\s]+@", r"\1***:***@", text)
+    return re.sub(r"gsk_[A-Za-z0-9_-]+", "gsk_***", text)
+
+
+def classify_request_error(detail):
+    raw = redact_secrets(detail).strip()
+    text = raw.lower()
+    cases = (
+        (("429", "too many requests"), "rate_limited", "YouTube 暂时限流，当前进度已保存。请等待 30–60 分钟后重试。", False),
+        (("sign in to confirm", "confirm you’re not a bot", "confirm you're not a bot", "login required", "cookies-from-browser"), "verification_required", "YouTube 要求登录或进行机器人验证。请先在浏览器确认 YouTube 可以正常访问。", False),
+        (("not available in your country", "geo-restricted", "geographic restriction"), "region_restricted", "这个视频受地区限制，当前网络位置无法访问。", False),
+        (("private video", "members-only", "members only"), "private_video", "这是私密或会员视频，公开模式无法归档。", False),
+        (("video unavailable", "this video is unavailable", "has been removed"), "video_unavailable", "视频已删除、不可用或频道暂时不允许访问。", False),
+        (("timed out", "timeout", "read operation timed out"), "timeout", "连接 YouTube 超时。请检查网络、代理或 VPN 后重试。", True),
+        (("name or service not known", "temporary failure in name resolution", "nodename nor servname", "getaddrinfo failed", "dns"), "dns_error", "无法解析 YouTube 地址，请检查 DNS 或网络连接。", True),
+        (("ssl", "certificate verify", "unexpected_eof", "tls"), "tls_error", "与 YouTube 建立安全连接失败，请检查代理、VPN 或系统时间。", True),
+        (("proxy", "tunnel connection failed"), "proxy_error", "代理连接失败，请检查系统或手动代理设置。", True),
+        (("connection reset", "connection refused", "network is unreachable", "remote end closed", "failed to establish a new connection"), "connection_error", "无法连接 YouTube，请检查网络、代理或 VPN。", True),
+    )
+    for needles, code, message, retryable in cases:
+        if any(needle in text for needle in needles):
+            return code, message, retryable, raw
+    return "youtube_error", "YouTube 返回了无法处理的错误，已保留现有结果。", False, raw
+
+
+def configured_proxy(explicit=None):
+    value = str(explicit or os.environ.get("YCA_PROXY") or "").strip()
+    if value.lower() in {"none", "off", "direct"}:
+        return None
+    if value:
+        return value
+    proxies = urllib.request.getproxies()
+    return proxies.get("https") or proxies.get("http") or proxies.get("all")
+
+
+def run_json(args, attempts=YTDLP_ATTEMPTS):
     bundled = os.environ.get("YCA_YTDLP")
     if not bundled and getattr(sys, "frozen", False):
         executable_dir = Path(sys.executable).resolve().parent
@@ -58,18 +109,101 @@ def run_json(args):
             executable_dir.parent / "Resources" / "yt-dlp_macos",
         )
         bundled = next((str(candidate) for candidate in candidates if candidate.is_file()), None)
-    command = [bundled or "yt-dlp", "--quiet", "--no-warnings", *args]
+    command = [
+        bundled or "yt-dlp",
+        "--quiet",
+        "--no-warnings",
+        "--socket-timeout",
+        str(YTDLP_SOCKET_TIMEOUT_SECONDS),
+        "--retries",
+        "2",
+        "--extractor-retries",
+        "2",
+    ]
+    if ACTIVE_PROXY:
+        command.extend(["--proxy", ACTIVE_PROXY])
+    command.extend(args)
     env = os.environ.copy()
+    env.pop("GROQ_API_KEY", None)
+    env.pop("OPENAI_API_KEY", None)
+    env.pop("YCA_AI_API_KEY", None)
     extra_paths = ["/opt/homebrew/bin", "/usr/local/bin"]
     env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
+    last_error = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                env=env,
+                timeout=YTDLP_TOTAL_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0:
+                try:
+                    return json.loads(result.stdout)
+                except json.JSONDecodeError as exc:
+                    detail = "yt-dlp 没有返回有效数据：{}".format(exc)
+            else:
+                detail = result.stderr or result.stdout or "yt-dlp 错误码 {}".format(result.returncode)
+        except FileNotFoundError:
+            raise SystemExit("找不到 yt-dlp。请重新安装完整版本，或在命令行环境中安装 yt-dlp。")
+        except subprocess.TimeoutExpired:
+            detail = "request timed out after {} seconds".format(YTDLP_TOTAL_TIMEOUT_SECONDS)
+        code, message, retryable, safe_detail = classify_request_error(detail)
+        last_error = ArchiveRequestError(code, message, safe_detail[-600:], retryable)
+        if not retryable or code == "rate_limited" or attempt >= attempts:
+            break
+        wait_seconds = min(4, attempt * 2)
+        emit_event(
+            "network_retry",
+            "{} 正在进行第 {}/{} 次重试……".format(message, attempt + 1, attempts),
+            level="warning",
+            error_type=code,
+            attempt=attempt + 1,
+            attempts=attempts,
+            wait_seconds=wait_seconds,
+        )
+        time.sleep(wait_seconds)
+    raise last_error
+
+
+def network_preflight():
+    emit_event("network_check", "正在检查 YouTube 网络连接……", proxy=bool(ACTIVE_PROXY))
     try:
-        result = subprocess.run(command, check=True, text=True, encoding="utf-8", errors="replace", capture_output=True, env=env)
-        return json.loads(result.stdout)
-    except FileNotFoundError:
-        raise SystemExit("找不到 yt-dlp。请重新安装完整版本，或在命令行环境中安装 yt-dlp。")
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-        detail = getattr(exc, "stderr", "") or str(exc)
-        raise RuntimeError(detail.strip()) from exc
+        socket.getaddrinfo("www.youtube.com", 443)
+    except OSError as exc:
+        code, message, retryable, detail = classify_request_error(exc)
+        emit_event("network_warning", message, level="warning", error_type=code, retryable=retryable, detail=detail[-300:])
+        return False
+    try:
+        handlers = []
+        if ACTIVE_PROXY and ACTIVE_PROXY.startswith(("http://", "https://")):
+            handlers.append(urllib.request.ProxyHandler({"http": ACTIVE_PROXY, "https": ACTIVE_PROXY}))
+        opener = urllib.request.build_opener(*handlers)
+        request = urllib.request.Request(
+            "https://www.youtube.com/generate_204",
+            headers={"User-Agent": "Mozilla/5.0 YouTube-Caption-Archive/2"},
+        )
+        with opener.open(request, timeout=8) as response:
+            if response.status >= 500:
+                raise RuntimeError("YouTube HTTP {}".format(response.status))
+        emit_event("network_ok", "YouTube 网络连接正常。", proxy=bool(ACTIVE_PROXY))
+        return True
+    except Exception as exc:
+        code, message, retryable, detail = classify_request_error(exc)
+        emit_event(
+            "network_warning",
+            "{} 程序仍会尝试读取频道。".format(message),
+            level="warning",
+            error_type=code,
+            retryable=retryable,
+            detail=detail[-300:],
+        )
+        return False
 
 
 def safe_name(value):
@@ -88,6 +222,12 @@ def normalize_channel_url(url):
     path = urllib.parse.unquote(parsed.path).rstrip("/")
     parts = [part for part in path.split("/") if part]
     is_youtube = host in {"youtube.com", "www.youtube.com", "m.youtube.com"}
+    if not is_youtube or not parts:
+        raise ArchiveRequestError(
+            "invalid_channel_url",
+            "请输入完整的 YouTube 频道主页链接，例如 https://www.youtube.com/@xxxx。",
+            retryable=False,
+        )
     is_channel_root = is_youtube and (
         (len(parts) == 1 and parts[0].startswith("@")) or
         (len(parts) == 2 and parts[0] in {"channel", "c", "user"})
@@ -185,8 +325,29 @@ def choose_track(info, languages):
 
 def fetch_segments(url):
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        data = json.load(response)
+    handlers = []
+    if ACTIVE_PROXY and ACTIVE_PROXY.startswith(("http://", "https://")):
+        handlers.append(urllib.request.ProxyHandler({"http": ACTIVE_PROXY, "https": ACTIVE_PROXY}))
+    opener = urllib.request.build_opener(*handlers)
+    for attempt in range(1, YTDLP_ATTEMPTS + 1):
+        try:
+            with opener.open(request, timeout=60) as response:
+                data = json.load(response)
+            break
+        except Exception as exc:
+            code, message, retryable, detail = classify_request_error(exc)
+            error = ArchiveRequestError(code, message, detail[-600:], retryable)
+            if not retryable or attempt >= YTDLP_ATTEMPTS:
+                raise error from exc
+            emit_event(
+                "network_retry",
+                "字幕文件读取失败，正在进行第 {}/{} 次重试……".format(attempt + 1, YTDLP_ATTEMPTS),
+                level="warning",
+                error_type=code,
+                attempt=attempt + 1,
+                attempts=YTDLP_ATTEMPTS,
+            )
+            time.sleep(attempt * 2)
     segments = []
     for event in data.get("events", []):
         parts = event.get("segs") or []
@@ -202,7 +363,7 @@ STYLE = """
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 main{max-width:1500px;margin:auto;padding:24px}.meta{color:var(--muted);margin-bottom:20px}.meta a{color:inherit}.layout{display:grid;grid-template-columns:minmax(360px,1.25fr) minmax(320px,1fr);gap:20px;align-items:start}
 .video{position:sticky;top:20px}.player{position:relative;padding-top:56.25%;background:#000}.player iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
-.transcript,.list{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 18px}.transcript{max-height:calc(100vh - 40px);overflow:auto}.line{display:grid;grid-template-columns:68px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
+.transcript,.list{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 18px}.transcript{max-height:calc(100vh - 40px);overflow:auto}.line{display:grid;grid-template-columns:68px 1fr;gap:10px;padding:9px 6px;border-bottom:1px solid var(--line);border-radius:7px;cursor:pointer;transition:background .15s ease,box-shadow .15s ease}.line:hover{background:color-mix(in srgb,var(--accent) 7%,transparent)}.line:focus-visible{outline:2px solid var(--accent);outline-offset:1px}.line.active{background:color-mix(in srgb,var(--accent) 11%,transparent);box-shadow:inset 3px 0 var(--accent)}
 .time{border:0;background:none;color:var(--accent);font:inherit;font-variant-numeric:tabular-nums;cursor:pointer;text-align:left;padding:0}.source{color:var(--muted);font-size:14px}.empty{color:var(--muted);padding:28px 0}.list a{color:var(--text);text-decoration:none}.list li{padding:10px 0;border-bottom:1px solid var(--line)}
 @media(max-width:850px){main{padding:14px}.layout{grid-template-columns:1fr}.video{position:static}.transcript{max-height:none}}
 """
@@ -214,7 +375,15 @@ def video_html(info, channel, source, language, segments):
     publish_time = info.get("published_at") or published_at(info)
     meta_record = {"id": video_id, "published_at": publish_time, **video_stats(info)}
     rows = "\n".join(
-        f'<div class="line"><button class="time" onclick="seek({int(sec)})">{timestamp(sec)}</button><div>{html.escape(text)}</div></div>'
+        '<div class="line" role="button" tabindex="0" data-start="{seconds}" '
+        'onclick="seek({seconds},this)" onkeydown="captionKey(event,{seconds},this)">'
+        '<button class="time" type="button" tabindex="-1" '
+        'onclick="event.stopPropagation();seek({seconds},this.closest(\'.line\'))">{stamp}</button>'
+        '<div>{text}</div></div>'.format(
+            seconds=("{:.3f}".format(max(0.0, float(sec))).rstrip("0").rstrip(".")),
+            stamp=timestamp(sec),
+            text=html.escape(text),
+        )
         for sec, text in segments
     )
     if not rows:
@@ -227,18 +396,77 @@ def video_html(info, channel, source, language, segments):
 <script src="https://www.youtube.com/iframe_api"></script><script>
 let player, pendingSeek=null;
 function onYouTubeIframeAPIReady(){{
-  const vars={{playsinline:1}};
+  const vars={{playsinline:1,enablejsapi:1}};
   if(location.protocol==='http:'||location.protocol==='https:') vars.origin=location.origin;
   player=new YT.Player('player',{{videoId:'{video_id}',playerVars:vars,events:{{onReady(){{
     if(pendingSeek!==null){{const s=pendingSeek;pendingSeek=null;seek(s);}}
   }}}}}});
 }}
-function seek(s){{
+function markCaption(row){{
+  document.querySelectorAll('.line.active').forEach(item=>item.classList.remove('active'));
+  if(row) row.classList.add('active');
+}}
+function commandPlayer(func,args){{
+  const frame=document.querySelector('#player iframe');
+  if(!frame||!frame.contentWindow) return false;
+  frame.contentWindow.postMessage(JSON.stringify({{event:'command',func:func,args:args||[]}}),'*');
+  return true;
+}}
+function seek(s,row){{
+  s=Number(s);
+  markCaption(row);
   if(player&&typeof player.seekTo==='function'){{player.seekTo(s,true);player.playVideo();}}
-  else pendingSeek=s;
+  else {{pendingSeek=s;commandPlayer('seekTo',[s,true]);commandPlayer('playVideo',[]);}}
   document.querySelector('.video').scrollIntoView({{behavior:'smooth',block:'start'}});
 }}
+function captionKey(event,s,row){{
+  if(event.key==='Enter'||event.key===' '){{event.preventDefault();seek(s,row);}}
+}}
 </script></body></html>"""
+
+
+def upgrade_caption_page_interactions(folder):
+    """Make caption text clickable in pages created by older versions."""
+    changed = 0
+    pattern = re.compile(
+        r'<div class="line"><button class="time" onclick="seek\(([-+0-9.]+)\)">'
+    )
+    interaction_style = (
+        ".line[role=button]{cursor:pointer;border-radius:7px;padding-left:6px;padding-right:6px}"
+        ".line[role=button]:hover{background:rgba(217,119,87,.08)}"
+        ".line[role=button]:focus-visible{outline:2px solid var(--accent);outline-offset:1px}"
+    )
+    for path in folder.glob("*.html"):
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if '<section class="transcript">' not in original or 'class="line"' not in original:
+            continue
+
+        def replacement(match):
+            seconds = match.group(1)
+            return (
+                '<div class="line" role="button" tabindex="0" data-start="{0}" '
+                'onclick="seek({0},this)" onkeydown="captionKey(event,{0},this)">'
+                '<button class="time" type="button" tabindex="-1" '
+                'onclick="event.stopPropagation();seek({0},this.closest(\'.line\'))">'
+            ).format(seconds)
+
+        updated = pattern.sub(replacement, original)
+        if updated == original:
+            continue
+        if interaction_style not in updated:
+            updated = updated.replace("</style>", interaction_style + "</style>", 1)
+        if "function captionKey(" not in updated:
+            updated = updated.replace(
+                "</script></body></html>",
+                "function captionKey(event,s,row){if(event.key==='Enter'||event.key===' '){event.preventDefault();seek(s,row);}}</script></body></html>",
+                1,
+            )
+        path.write_text(updated, encoding="utf-8")
+        changed += 1
+    return changed
 
 
 def write_index(folder, channel, records):
@@ -492,12 +720,17 @@ def open_archive_detached(root, relative_page="index.html"):
             page,
         ]
     with log_path.open("a", encoding="utf-8") as log:
+        detached_environment = os.environ.copy()
+        detached_environment.pop("GROQ_API_KEY", None)
+        detached_environment.pop("OPENAI_API_KEY", None)
+        detached_environment.pop("YCA_AI_API_KEY", None)
         subprocess.Popen(
             command,
             stdout=log,
             stderr=log,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            env=detached_environment,
         )
     emit_event(
         "open_page",
@@ -526,7 +759,184 @@ def interactive_config(args):
 
 def is_rate_limit_error(exc):
     text = str(exc).lower()
-    return "429" in text or "too many requests" in text
+    return getattr(exc, "code", "") == "rate_limited" or "429" in text or "too many requests" in text
+
+
+def retry_queue_path(folder):
+    return folder / ".caption-retry.json"
+
+
+def load_retry_queue(folder):
+    try:
+        payload = json.loads(retry_queue_path(folder).read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_retry_queue(folder, queue):
+    path = retry_queue_path(folder)
+    if not queue:
+        path.unlink(missing_ok=True)
+        return
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def queue_video_retry(queue, video_id, title, exc):
+    previous = queue.get(video_id) if isinstance(queue.get(video_id), dict) else {}
+    queue[video_id] = {
+        "id": video_id,
+        "title": title,
+        "error_type": getattr(exc, "code", "youtube_error"),
+        "message": getattr(exc, "message", str(exc)),
+        "last_detail": redact_secrets(getattr(exc, "detail", ""))[-300:],
+        "attempts": int(previous.get("attempts") or 0) + 1,
+        "last_attempt": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def should_stop_channel(exc, consecutive_network_errors):
+    code = getattr(exc, "code", "")
+    if code in {
+        "rate_limited",
+        "verification_required",
+        "proxy_error",
+        "ai_auth_error",
+        "ai_rate_limited",
+        "ai_connection_error",
+    }:
+        return True
+    return code in {"timeout", "dns_error", "tls_error", "connection_error"} and consecutive_network_errors >= 3
+
+
+def normalized_request_error(exc):
+    if isinstance(exc, ArchiveRequestError):
+        return exc
+    code, message, retryable, detail = classify_request_error(exc)
+    return ArchiveRequestError(code, message, detail[-600:], retryable)
+
+
+def ai_provider_name(provider):
+    return {"groq": "Groq", "openai": "OpenAI"}.get(str(provider).lower(), "AI 字幕服务")
+
+
+def ai_source_name(provider):
+    return {"groq": "Groq AI 字幕", "openai": "OpenAI Whisper 字幕"}.get(
+        str(provider).lower(), "AI 字幕"
+    )
+
+
+def normalized_ai_error(exc, provider="groq"):
+    """Turn transcription failures into stable user-facing errors without leaking secrets."""
+    if isinstance(exc, ArchiveRequestError):
+        return exc
+    detail = redact_secrets(exc)
+    status_code = int(getattr(exc, "status_code", 0) or 0)
+    lowered = detail.lower()
+    provider_name = ai_provider_name(provider)
+    if status_code in {401, 403} or "api key" in lowered:
+        return ArchiveRequestError(
+            "ai_auth_error",
+            "{} API Key无效或没有访问权限。请在应用中重新输入正确的 Key。".format(provider_name),
+            detail[-600:],
+            False,
+        )
+    if status_code == 429:
+        return ArchiveRequestError(
+            "ai_rate_limited",
+            "{} 字幕额度或速率已达到限制。当前进度已保存，请稍后继续。".format(provider_name),
+            detail[-600:],
+            True,
+        )
+    if status_code in {500, 502, 503, 504}:
+        return ArchiveRequestError(
+            "ai_connection_error",
+            "{} 字幕服务暂时不可用。当前进度已保存，请稍后继续。".format(provider_name),
+            detail[-600:],
+            True,
+        )
+    if status_code == 0 and ("无法连接" in detail or "timed out" in lowered or "timeout" in lowered):
+        return ArchiveRequestError(
+            "ai_connection_error",
+            "暂时无法连接 {} 字幕服务。当前进度已保存，请检查网络后重试。".format(provider_name),
+            detail[-600:],
+            True,
+        )
+    return ArchiveRequestError(
+        "ai_transcription_error",
+        "AI 字幕生成失败，已保留无字幕页面，下次运行会自动重试。",
+        detail[-600:],
+        True,
+    )
+
+
+def transcribe_missing_video(video_id, folder, api_key, language="auto", provider="groq"):
+    """Generate timestamped AI captions while retaining no temporary media."""
+    try:
+        from mvp import next_round_mvp as ai_engine
+    except ImportError as exc:
+        raise ArchiveRequestError(
+            "ai_component_missing",
+            "应用缺少 AI 字幕组件，请重新安装完整版本。",
+            str(exc),
+            False,
+        ) from exc
+
+    video_url = "https://www.youtube.com/watch?v={}".format(video_id)
+    checkpoint_root = folder / ".ai-checkpoints" / video_id
+
+    def progress(message):
+        emit_event("ai_progress", str(message), video_id=video_id)
+
+    emit_event(
+        "ai_started",
+        "没有找到 YouTube 字幕，正在生成 AI 字幕……",
+        video_id=video_id,
+    )
+    try:
+        raw_segments, report = ai_engine.transcribe_video(
+            video_url,
+            api_key,
+            checkpoint_root,
+            language=language,
+            concurrency=2,
+            logger=progress,
+            provider=provider,
+        )
+    except Exception as exc:
+        raise normalized_ai_error(exc, provider) from exc
+
+    segments = [
+        (float(item.get("start") or 0.0), str(item.get("text") or "").strip())
+        for item in raw_segments
+        if str(item.get("text") or "").strip()
+    ]
+    if not segments:
+        raise ArchiveRequestError(
+            "ai_transcription_error",
+            "{} 没有返回可用字幕，已保留无字幕页面，下次运行会自动重试。".format(ai_provider_name(provider)),
+            "empty AI transcript",
+            True,
+        )
+
+    report_dir = folder / ".ai-reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "{}.json".format(video_id)
+    temporary = report_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(report_path)
+    emit_event(
+        "ai_completed",
+        "AI 字幕生成完成：{} 段，用时 {:.1f} 秒。".format(
+            len(segments), float(report.get("total_seconds") or 0.0)
+        ),
+        video_id=video_id,
+        segments=len(segments),
+        seconds=float(report.get("total_seconds") or 0.0),
+    )
+    return segments, report
 
 
 def print_rate_limit_hint():
@@ -666,6 +1076,7 @@ def refresh_no_subtitle_metadata(folder, channel, archive, archive_path, timezon
     ]
     if metadata_limit is not None:
         targets = targets[:max(0, metadata_limit)]
+    consecutive_network_errors = 0
     for index, (video_id, record) in enumerate(targets, 1):
         emit_event(
             "metadata_progress",
@@ -678,10 +1089,35 @@ def refresh_no_subtitle_metadata(folder, channel, archive, archive_path, timezon
         try:
             info = run_json(["--skip-download", "--dump-single-json", f"https://www.youtube.com/watch?v={video_id}"])
         except Exception as exc:
-            emit_event("metadata_error", f"元数据回填失败（稍后可重试）：{exc}", level="error", channel=channel, video_id=video_id)
+            error = normalized_request_error(exc)
+            if error.code in {"timeout", "dns_error", "tls_error", "connection_error", "proxy_error"}:
+                consecutive_network_errors += 1
+            else:
+                consecutive_network_errors = 0
+            emit_event(
+                "metadata_error",
+                "元数据回填失败（稍后自动重试）：{}".format(error.message),
+                level="error",
+                channel=channel,
+                video_id=video_id,
+                error_type=error.code,
+                retryable=error.retryable,
+            )
+            if is_rate_limit_error(error):
+                print_rate_limit_hint()
+            if should_stop_channel(error, consecutive_network_errors):
+                emit_event(
+                    "metadata_paused",
+                    "为避免连续请求，元数据回填已暂停；下次运行会继续。",
+                    level="warning",
+                    channel=channel,
+                    error_type=error.code,
+                )
+                break
             if delay_seconds:
                 time.sleep(delay_seconds)
             continue
+        consecutive_network_errors = 0
         publish_time = published_at(info, timezone_name)
         date = info.get("upload_date") or record.get("date", "")
         display_date = f"{date[:4]}-{date[4:6]}-{date[6:]}" if len(date) == 8 and date.isdigit() else date
@@ -714,7 +1150,21 @@ def refresh_no_subtitle_metadata(folder, channel, archive, archive_path, timezon
     return changed
 
 
-def process_channel(root, channel_cfg, retry_missing=False, limit=None, metadata_limit=None, install_channel_launchers=False):
+def process_channel(
+    root,
+    channel_cfg,
+    retry_missing=False,
+    limit=None,
+    metadata_limit=None,
+    install_channel_launchers=False,
+    ai_transcribe_missing=False,
+    groq_api_key="",
+    ai_language="auto",
+    ai_provider="groq",
+):
+    # Keep the historical keyword for third-party scripts; it now carries the
+    # selected provider's key, not only a Groq key.
+    ai_api_key = groq_api_key
     channel_url = normalize_channel_url(channel_cfg["url"])
     playlist = run_json(["--flat-playlist", "--dump-single-json", channel_url])
     channel = (channel_cfg.get("name") or playlist.get("channel") or
@@ -723,10 +1173,32 @@ def process_channel(root, channel_cfg, retry_missing=False, limit=None, metadata
     folder.mkdir(parents=True, exist_ok=True)
     archive_path = folder / ".caption-archive.json"
     archive = json.loads(archive_path.read_text("utf-8")) if archive_path.exists() else {}
+    retry_queue = load_retry_queue(folder)
+    for completed_id in set(retry_queue).intersection(archive):
+        if archive[completed_id].get("status") == "done":
+            retry_queue.pop(completed_id, None)
+    save_retry_queue(folder, retry_queue)
     if ensure_no_subtitle_pages(folder, channel, archive):
         archive_path.write_text(json.dumps(archive, ensure_ascii=False, indent=2), encoding="utf-8")
+    upgraded_pages = upgrade_caption_page_interactions(folder)
+    if upgraded_pages:
+        emit_event(
+            "caption_pages_upgraded",
+            "已升级 {} 个旧字幕页面，现在可点击整行字幕跳转视频。".format(upgraded_pages),
+            channel=channel,
+            pages=upgraded_pages,
+        )
     languages = channel_cfg.get("languages", DEFAULT_LANGUAGES)
     entries = playlist.get("entries") or []
+    if retry_queue:
+        queued_ids = set(retry_queue)
+        entries = sorted(entries, key=lambda item: 0 if item.get("id") in queued_ids else 1)
+        emit_event(
+            "retry_queue_loaded",
+            "发现 {} 条上次未完成的视频，将优先重试。".format(len(retry_queue)),
+            level="warning",
+            queued=len(retry_queue),
+        )
     emit_event(
         "channel_loaded",
         f"已读取频道：{channel}，共 {len(entries)} 条公开视频。",
@@ -739,9 +1211,16 @@ def process_channel(root, channel_cfg, retry_missing=False, limit=None, metadata
     if metadata_limit is not None and metadata_limit > 0 and refresh_no_subtitle_metadata(folder, channel, archive, archive_path, channel_cfg.get("timezone", "Asia/Shanghai"), delay_seconds, metadata_limit):
         archive_path.write_text(json.dumps(archive, ensure_ascii=False, indent=2), encoding="utf-8")
     attempted = 0
+    consecutive_network_errors = 0
+    stopped_for_network = False
     for position, entry in enumerate(entries, 1):
         video_id = entry.get("id")
-        if not video_id or (video_id in archive and not (retry_missing and archive[video_id].get("status") == "no_subtitles")):
+        retry_old_missing = (
+            video_id in archive
+            and archive[video_id].get("status") == "no_subtitles"
+            and (retry_missing or ai_transcribe_missing)
+        )
+        if not video_id or (video_id in archive and not retry_old_missing):
             continue
         # In direct/GUI mode a batch size of 0 means "no limit".  The explicit
         # --limit 0 form keeps its older meaning (process no new videos), which
@@ -781,8 +1260,33 @@ def process_channel(root, channel_cfg, retry_missing=False, limit=None, metadata
                 date = info.get("upload_date") or ""
                 display_date = f"{date[:4]}-{date[4:6]}-{date[6:]}" if len(date) == 8 else date
                 filename = f"{display_date + '_' if display_date else ''}{video_id}.html"
-                (folder / filename).write_text(video_html(info, channel, "无字幕", "", []), encoding="utf-8")
-                archive[video_id] = {"status": "no_subtitles", "title": info.get("title", video_id), "date": display_date, "published_at": publish_time, **stats, "source": "无字幕", "file": filename}
+                if ai_transcribe_missing:
+                    try:
+                        segments, ai_report = transcribe_missing_video(
+                            video_id, folder, ai_api_key, ai_language, ai_provider
+                        )
+                    except Exception:
+                        # Preserve a playable page and metadata even if the AI service fails.
+                        (folder / filename).write_text(video_html(info, channel, "无字幕", "", []), encoding="utf-8")
+                        archive[video_id] = {"status": "no_subtitles", "title": info.get("title", video_id), "date": display_date, "published_at": publish_time, **stats, "source": "无字幕", "file": filename}
+                        archive_path.write_text(json.dumps(archive, ensure_ascii=False, indent=2), encoding="utf-8")
+                        raise
+                    source_name = ai_source_name(ai_provider)
+                    (folder / filename).write_text(video_html(info, channel, source_name, ai_language, segments), encoding="utf-8")
+                    archive[video_id] = {
+                        "status": "done",
+                        "title": info.get("title", video_id),
+                        "date": display_date,
+                        "published_at": publish_time,
+                        **stats,
+                        "source": source_name,
+                        "language": ai_language,
+                        "file": filename,
+                        "ai_model": ai_report.get("model"),
+                    }
+                else:
+                    (folder / filename).write_text(video_html(info, channel, "无字幕", "", []), encoding="utf-8")
+                    archive[video_id] = {"status": "no_subtitles", "title": info.get("title", video_id), "date": display_date, "published_at": publish_time, **stats, "source": "无字幕", "file": filename}
             else:
                 source, language, subtitle_url = selected
                 segments = fetch_segments(subtitle_url)
@@ -791,19 +1295,43 @@ def process_channel(root, channel_cfg, retry_missing=False, limit=None, metadata
                 filename = f"{display_date + '_' if display_date else ''}{video_id}.html"
                 (folder / filename).write_text(video_html(info, channel, source, language, segments), encoding="utf-8")
                 archive[video_id] = {"status": "done", "title": info.get("title", video_id), "date": display_date, "published_at": publish_time, **stats, "source": source, "file": filename}
+            consecutive_network_errors = 0
+            retry_queue.pop(video_id, None)
+            save_retry_queue(folder, retry_queue)
         except Exception as exc:
+            error = normalized_request_error(exc)
+            queue_video_retry(retry_queue, video_id, title, error)
+            save_retry_queue(folder, retry_queue)
+            if error.code in {"timeout", "dns_error", "tls_error", "connection_error", "proxy_error"}:
+                consecutive_network_errors += 1
+            else:
+                consecutive_network_errors = 0
             emit_event(
-                "video_error",
-                f"跳过（稍后可重试）：{exc}",
+                "retry_queued",
+                "{} 已加入待重试队列：{}".format(title, error.message),
                 level="error",
                 channel=channel,
                 position=position,
                 total=len(entries),
                 title=title,
                 video_id=video_id,
+                error_type=error.code,
+                retryable=error.retryable,
+                queued=len(retry_queue),
             )
-            if is_rate_limit_error(exc):
+            if is_rate_limit_error(error):
                 print_rate_limit_hint()
+            if should_stop_channel(error, consecutive_network_errors):
+                stopped_for_network = True
+                emit_event(
+                    "channel_paused",
+                    "为避免连续请求，当前频道已暂停。已完成内容和待重试队列都已保存。",
+                    level="warning",
+                    channel=channel,
+                    error_type=error.code,
+                    queued=len(retry_queue),
+                )
+                break
             if delay_seconds:
                 time.sleep(delay_seconds)
             continue
@@ -825,6 +1353,8 @@ def process_channel(root, channel_cfg, retry_missing=False, limit=None, metadata
         folder=folder.name,
         processed=attempted,
         archived=len(records),
+        queued=len(retry_queue),
+        paused=stopped_for_network,
     )
     return channel, folder
 
@@ -860,6 +1390,10 @@ def main():
     parser.add_argument("--limit", type=int, help="本次每个频道最多处理 N 条未归档视频")
     parser.add_argument("--metadata-limit", type=int, help="本次每个频道最多回填 N 条旧视频的发布时间、观看数、点赞数和评论数")
     parser.add_argument("--retry-missing", action="store_true", help="重新检查之前无字幕的视频")
+    parser.add_argument("--ai-transcribe-missing", action="store_true", help="没有 YouTube 字幕时使用云端语音识别生成 AI 字幕")
+    parser.add_argument("--ai-provider", choices=("groq", "openai"), default="groq", help="AI 字幕服务；默认 Groq")
+    parser.add_argument("--ai-language", default="auto", help="AI 字幕语言；默认自动检测")
+    parser.add_argument("--proxy", help="手动代理地址；留空时自动读取系统代理，填 none 表示直连")
     parser.add_argument("--interactive", action="store_true", help="交互式输入频道链接和本次数量")
     parser.add_argument("--open", action="store_true", help="启动本地 HTTP 服务并打开已生成档案")
     parser.add_argument("--open-after", action="store_true", help="抓取完成后自动打开刚处理的频道页")
@@ -867,7 +1401,7 @@ def main():
     parser.add_argument("--event-format", choices=("text", "jsonl"), default="text", help=argparse.SUPPRESS)
     parser.add_argument("--install-launchers", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    global EVENT_FORMAT
+    global EVENT_FORMAT, ACTIVE_PROXY
     EVENT_FORMAT = args.event_format
     if args.open:
         open_archive(args.output, args.page)
@@ -876,19 +1410,67 @@ def main():
         args = interactive_config(args)
     root = Path(args.output).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
+    provider_prefix = {"groq": "gsk_", "openai": "sk-"}[args.ai_provider]
+    provider_env = {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY"}[args.ai_provider]
+    ai_api_key = (os.environ.get("YCA_AI_API_KEY") or os.environ.get(provider_env) or "").strip()
+    if args.ai_transcribe_missing and (
+        not ai_api_key.startswith(provider_prefix) or len(ai_api_key) < 20
+    ):
+        emit_event(
+            "ai_key_missing",
+            "需要先在应用中输入完整的 {} API Key，才能为无字幕视频生成 AI 字幕。".format(ai_provider_name(args.ai_provider)),
+            level="error",
+        )
+        raise SystemExit(3)
+    ACTIVE_PROXY = configured_proxy(args.proxy)
+    if ACTIVE_PROXY and ACTIVE_PROXY.startswith(("http://", "https://")):
+        os.environ["HTTPS_PROXY"] = ACTIVE_PROXY
+        os.environ["HTTP_PROXY"] = ACTIVE_PROXY
+    if ACTIVE_PROXY:
+        emit_event("proxy_detected", "已启用网络代理（地址已隐藏）。", proxy=True)
+    else:
+        emit_event("proxy_detected", "未检测到代理，将使用网络直连。", proxy=False)
+    network_preflight()
     config = config_from_args(args)
     processed = []
+    channel_failures = []
     for channel in config.get("channels", []):
-        channel_name, folder = process_channel(
-            root,
-            channel,
-            args.retry_missing,
-            args.limit,
-            args.metadata_limit,
-            args.install_launchers,
+        try:
+            channel_name, folder = process_channel(
+                root,
+                channel,
+                args.retry_missing,
+                args.limit,
+                args.metadata_limit,
+                args.install_launchers,
+                args.ai_transcribe_missing,
+                ai_api_key,
+                args.ai_language,
+                args.ai_provider,
+            )
+            processed.append((channel_name, folder))
+        except Exception as exc:
+            error = normalized_request_error(exc)
+            channel_failures.append(error)
+            emit_event(
+                "channel_error",
+                "无法读取频道：{}".format(error.message),
+                level="error",
+                channel_url=decode_user_url(channel.get("url", "")),
+                error_type=error.code,
+                retryable=error.retryable,
+                detail=error.detail[-300:],
+            )
+    try:
+        write_root_index(root)
+    except PermissionError:
+        emit_event(
+            "archive_permission_error",
+            "无法写入字幕档案文件夹。请在应用中重新选择档案位置后再试；已有结果不会丢失。",
+            level="error",
+            output=str(root),
         )
-        processed.append((channel_name, folder))
-    write_root_index(root)
+        raise SystemExit(4)
     if (root / "channels.json").exists():
         write_update_launcher(root)
     # Launcher installation is a packaging operation, not part of an archive
@@ -896,10 +1478,18 @@ def main():
     # nesting stale launchers inside its Resources directory after every run.
     if args.install_launchers:
         write_beginner_launchers(Path(__file__).resolve().parent)
-    emit_event("archive_completed", f"完成：{root}", output=str(root), channels=len(processed))
+    emit_event(
+        "archive_completed",
+        "完成：{}{}".format(root, "（有 {} 个频道未完成）".format(len(channel_failures)) if channel_failures else ""),
+        output=str(root),
+        channels=len(processed),
+        failed_channels=len(channel_failures),
+    )
     if args.open_after and processed:
         _, folder = processed[-1]
         open_archive_detached(root, urllib.parse.quote(folder.name) + "/index.html")
+    if channel_failures and not processed:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
