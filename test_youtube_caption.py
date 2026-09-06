@@ -32,6 +32,10 @@ class NetworkReliabilityTests(unittest.TestCase):
         secret = "gsk_" + "test-only-not-a-real-secret-123456"
         self.assertNotIn(secret, archive.redact_secrets("request failed for " + secret))
 
+    def test_openai_key_is_redacted(self):
+        secret = "sk-" + "test-only-not-a-real-secret-123456"
+        self.assertNotIn(secret, archive.redact_secrets("request failed for " + secret))
+
     def test_ai_service_outage_pauses_channel(self):
         upstream = type("GroqFailure", (Exception,), {"status_code": 503})("service unavailable")
         error = archive.normalized_ai_error(upstream)

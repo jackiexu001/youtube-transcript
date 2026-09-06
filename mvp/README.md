@@ -18,7 +18,7 @@ macOS图形化MVP：双击`运行 Groq MVP.app`，粘贴完整Key后点击“开
 
 ```bash
 export GROQ_API_KEY='你的Groq API Key'
-cd "/path/to/YouTube Transcript"
+cd "/Users/larryxu/Documents/Youtube Caption"
 python3 mvp/cloud_asr_mvp.py \
   --video-url 'https://www.youtube.com/watch?v=jpoMabs9t4s'
 ```
@@ -57,7 +57,7 @@ commit 95842ecb5618c0b6a548a336bdfb0eb859bdb501
 ## 离线测试
 
 ```bash
-cd "/path/to/YouTube Transcript/mvp"
+cd "/Users/larryxu/Documents/Youtube Caption/mvp"
 python3 -m unittest -v test_cloud_asr_mvp.py
 ```
 
@@ -73,7 +73,7 @@ python3 -m unittest -v test_cloud_asr_mvp.py
 它只请求段落时间戳，并记录首段字幕出现时间与完整端到端时间：
 
 ```bash
-cd "/path/to/YouTube Transcript"
+cd "/Users/larryxu/Documents/Youtube Caption"
 python3 mvp/next_round_mvp.py
 ```
 

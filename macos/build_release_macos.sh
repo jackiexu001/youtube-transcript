@@ -131,6 +131,10 @@ hdiutil detach "$DMG_MOUNT" >/dev/null
 hdiutil convert "$RW_DMG" -format UDZO -o "$FINAL_DMG" >/dev/null
 mv "$FINAL_DMG" "$DMG_FILE"
 
-shasum -a 256 "$DMG_FILE" > "$DMG_FILE.sha256"
+DMG_NAME="${DMG_FILE:t}"
+(
+  cd "$RELEASE_DIR"
+  shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
+)
 echo "已生成：$DMG_FILE"
 echo "说明：这是免费、未公证版本；首次打开需要在系统设置的隐私与安全性中选择仍要打开。"

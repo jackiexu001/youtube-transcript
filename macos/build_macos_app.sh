@@ -10,7 +10,10 @@ BACKEND_FILE="$PROJECT_ROOT/youtube_caption.py"
 BACKEND_EXECUTABLE="${YCA_BACKEND_EXECUTABLE:-$PROJECT_ROOT/.build/backend-dist/youtube-caption-backend}"
 YTDLP_EXECUTABLE="${YCA_YTDLP_EXECUTABLE:-$PROJECT_ROOT/.build/downloads/yt-dlp_macos}"
 FFMPEG_EXECUTABLE="${YCA_FFMPEG_EXECUTABLE:-$PROJECT_ROOT/.build/downloads/ffmpeg_macos}"
-OUTPUT_APP="${YCA_OUTPUT_APP:-$PROJECT_ROOT/YouTube Transcript.app}"
+# Keep local development builds inside a hidden, non-indexed products folder.
+# A root-level .app is picked up by Spotlight (and cloud-drive clients) as a
+# second installed copy, which confuses users after they install the DMG build.
+OUTPUT_APP="${YCA_OUTPUT_APP:-$PROJECT_ROOT/.build/Products.noindex/YouTube Transcript.app}"
 BUILD_ROOT="$(mktemp -d /private/tmp/youtube-caption-macos.XXXXXX)"
 STAGED_APP="$BUILD_ROOT/YouTube Transcript.app"
 STAGED_MACOS="$STAGED_APP/Contents/MacOS"

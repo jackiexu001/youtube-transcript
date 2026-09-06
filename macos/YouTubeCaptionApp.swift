@@ -5,7 +5,25 @@ import Security
 
 private let appTitle = "YouTube Transcript"
 
-final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AdaptiveBorderScrollView: NSScrollView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateBorderColor()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBorderColor()
+    }
+
+    private func updateBorderColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.separatorColor.cgColor
+        }
+    }
+}
+
+final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate {
     private var window: NSWindow!
     private var channelField: NSTextField!
     private var batchField: NSTextField!
@@ -13,6 +31,7 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var proxyField: NSTextField!
     private var aiKeyField: NSSecureTextField!
     private var aiProviderPopup: NSPopUpButton!
+    private var saveAPIKeyButton: NSButton!
     private var getAPIKeyButton: NSButton!
     private var aiEnabledButton: NSButton!
     private var chooseArchiveButton: NSButton!
@@ -43,7 +62,11 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let proxyDefaultsKey = "YouTubeCaptionProxy"
     private let aiEnabledDefaultsKey = "YouTubeCaptionAIEnabled"
     private let aiProviderDefaultsKey = "YouTubeCaptionAIProvider"
+    private let themeDefaultsKey = "YouTubeTranscriptTheme"
     private var activeAIProvider = "groq"
+    private var activeTheme = "system"
+    private var themeMenuItems: [NSMenuItem] = []
+    private var apiKeyDrafts: [String: String] = [:]
     private var archiveAccessURL: URL?
     private let timestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -121,6 +144,9 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        migrateLegacyPreferencesIfNeeded()
+        activeTheme = normalizedTheme(UserDefaults.standard.string(forKey: themeDefaultsKey) ?? "system")
+        applyTheme(activeTheme, persist: false)
         buildMainMenu()
         buildWindow()
         window.makeKeyAndOrderFront(nil)
@@ -128,8 +154,30 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         showInstallerCleanupNoticeIfNeeded()
     }
 
+    private func migrateLegacyPreferencesIfNeeded() {
+        let migrationKey = "YouTubeTranscriptDidMigrateLegacyPreferences"
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: migrationKey),
+              let legacy = UserDefaults(suiteName: "com.youtube-caption.archive") else { return }
+        let keys = [
+            archivePathDefaultsKey,
+            archiveBookmarkDefaultsKey,
+            proxyDefaultsKey,
+            aiEnabledDefaultsKey,
+            aiProviderDefaultsKey,
+            themeDefaultsKey,
+        ]
+        for key in keys where defaults.object(forKey: key) == nil {
+            if let value = legacy.object(forKey: key) {
+                defaults.set(value, forKey: key)
+            }
+        }
+        defaults.set(true, forKey: migrationKey)
+    }
+
     private func showInstallerCleanupNoticeIfNeeded() {
-        let noticeKey = "YouTubeCaptionDidShowInstallerCleanupNotice"
+        let noticeVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "current"
+        let noticeKey = "YouTubeCaptionDidShowInstallerCleanupNotice-\(noticeVersion)"
         guard !UserDefaults.standard.bool(forKey: noticeKey) else { return }
         let appPath = Bundle.main.bundleURL.standardizedFileURL.path
         let installed = appPath.hasPrefix("/Applications/")
@@ -142,12 +190,16 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let alert = NSAlert()
             alert.alertStyle = .informational
             alert.messageText = "应用已经安装完成"
-            alert.informativeText = "现在可以推出“YouTube Transcript”安装磁盘，并删除“下载”文件夹里的 DMG 安装包。删除安装包不会影响应用和已经生成的字幕档案。"
+            alert.informativeText = "现在可以推出“YouTube Transcript”安装磁盘，并删除“下载”文件夹里的 DMG 安装包。\n\n如果搜索时看到两个同名图标，通常是安装磁盘尚未推出；如果还看到“开始抓取 YouTube 字幕”，请在“应用程序”文件夹中删除这个旧版本。删除安装包和旧应用不会影响已经生成的字幕档案。"
             alert.addButton(withTitle: "知道了")
+            alert.addButton(withTitle: "打开应用程序文件夹")
             alert.addButton(withTitle: "打开下载文件夹")
             alert.beginSheetModal(for: self.window) { response in
                 UserDefaults.standard.set(true, forKey: noticeKey)
                 if response == .alertSecondButtonReturn,
+                   let applications = FileManager.default.urls(for: .applicationDirectory, in: .localDomainMask).first {
+                    NSWorkspace.shared.open(applications)
+                } else if response == .alertThirdButtonReturn,
                    let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first {
                     NSWorkspace.shared.open(downloads)
                 }
@@ -220,12 +272,26 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let settingsItem = NSMenuItem()
         let settingsMenu = NSMenu(title: "设置")
         addAction(settingsMenu, "网络代理…", #selector(configureNetworkProxy), ",")
+        addAction(settingsMenu, "保存当前 API Key", #selector(saveSelectedAPIKey))
+        settingsMenu.addItem(.separator())
+        let themeItem = NSMenuItem(title: "主题", action: nil, keyEquivalent: "")
+        let themeMenu = NSMenu(title: "主题")
+        themeMenuItems = [
+            makeThemeMenuItem(title: "跟随系统（System）", value: "system"),
+            makeThemeMenuItem(title: "浅色（Light）", value: "light"),
+            makeThemeMenuItem(title: "深色（Dark）", value: "dark"),
+        ]
+        themeMenuItems.forEach { themeMenu.addItem($0) }
+        themeItem.submenu = themeMenu
+        settingsMenu.addItem(themeItem)
+        updateThemeMenuChecks()
         settingsItem.submenu = settingsMenu
         main.addItem(settingsItem)
 
         let helpItem = NSMenuItem()
         let helpMenu = NSMenu(title: "帮助")
         addAction(helpMenu, "使用说明", #selector(openUserGuide), "?")
+        addAction(helpMenu, "为什么搜索到多个应用？", #selector(showDuplicateAppsHelp))
         helpMenu.addItem(.separator())
         addAction(helpMenu, "获取 Groq API Key", #selector(openGroqAPIKeyPage))
         addAction(helpMenu, "获取 OpenAI API Key", #selector(openOpenAIAPIKeyPage))
@@ -247,6 +313,52 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
+    @objc private func showDuplicateAppsHelp() {
+        showAlert(
+            title: "为什么会看到多个应用？",
+            message: "安装后尚未推出 DMG 时，macOS 会同时搜索到“应用程序”中的正式副本和安装磁盘中的临时副本。推出安装磁盘并删除下载的 DMG 即可。\n\n如果还看到“开始抓取 YouTube 字幕”，那是旧版本，可以从“应用程序”文件夹删除；字幕档案不会被删除。"
+        )
+    }
+
+    private func normalizedTheme(_ value: String) -> String {
+        ["system", "light", "dark"].contains(value) ? value : "system"
+    }
+
+    private func makeThemeMenuItem(title: String, value: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(changeTheme(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = value
+        return item
+    }
+
+    private func updateThemeMenuChecks() {
+        themeMenuItems.forEach { item in
+            item.state = (item.representedObject as? String) == activeTheme ? .on : .off
+        }
+    }
+
+    private func applyTheme(_ theme: String, persist: Bool = true) {
+        activeTheme = normalizedTheme(theme)
+        switch activeTheme {
+        case "light":
+            NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        default:
+            NSApp.appearance = nil
+        }
+        if persist {
+            UserDefaults.standard.set(activeTheme, forKey: themeDefaultsKey)
+        }
+        updateThemeMenuChecks()
+        window?.contentView?.needsDisplay = true
+    }
+
+    @objc private func changeTheme(_ sender: NSMenuItem) {
+        guard let theme = sender.representedObject as? String else { return }
+        applyTheme(theme)
+    }
+
     private func buildWindow() {
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 960, height: 890),
@@ -262,7 +374,7 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         guard let content = window.contentView else { return }
         content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        content.layer?.backgroundColor = nil
 
         let brandIcon = NSImageView()
         if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") {
@@ -344,15 +456,21 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         aiProviderPopup.action = #selector(aiProviderChanged)
         aiProviderPopup.controlSize = .large
         aiProviderPopup.translatesAutoresizingMaskIntoConstraints = false
-        aiKeyField = NSSecureTextField(string: loadAPIKey(provider: activeAIProvider))
+        let storedAPIKey = loadAPIKey(provider: activeAIProvider)
+        apiKeyDrafts[activeAIProvider] = storedAPIKey
+        aiKeyField = NSSecureTextField(string: storedAPIKey)
         aiKeyField.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         aiKeyField.controlSize = .large
         aiKeyField.usesSingleLineMode = true
+        aiKeyField.delegate = self
         aiKeyField.translatesAutoresizingMaskIntoConstraints = false
+        saveAPIKeyButton = NSButton(title: storedAPIKey.isEmpty ? "保存 Key" : "已保存", target: self, action: #selector(saveSelectedAPIKey))
+        saveAPIKeyButton.bezelStyle = .rounded
+        saveAPIKeyButton.controlSize = .regular
         getAPIKeyButton = NSButton(title: "获取 API Key", target: self, action: #selector(openSelectedAPIKeyPage))
         getAPIKeyButton.bezelStyle = .rounded
         getAPIKeyButton.controlSize = .regular
-        let aiCredentialRow = NSStackView(views: [aiProviderPopup, aiKeyField, getAPIKeyButton])
+        let aiCredentialRow = NSStackView(views: [aiProviderPopup, aiKeyField, saveAPIKeyButton, getAPIKeyButton])
         aiCredentialRow.orientation = .horizontal
         aiCredentialRow.alignment = .centerY
         aiCredentialRow.spacing = 8
@@ -490,7 +608,7 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         logHeader.spacing = 3
         logHeader.translatesAutoresizingMaskIntoConstraints = false
 
-        let logScroll = NSScrollView()
+        let logScroll = AdaptiveBorderScrollView()
         logScroll.hasVerticalScroller = true
         logScroll.hasHorizontalScroller = false
         logScroll.autohidesScrollers = true
@@ -500,7 +618,6 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         logScroll.wantsLayer = true
         logScroll.layer?.cornerRadius = 10
         logScroll.layer?.borderWidth = 1
-        logScroll.layer?.borderColor = NSColor.separatorColor.cgColor
         logScroll.layer?.masksToBounds = true
         logScroll.translatesAutoresizingMaskIntoConstraints = false
 
@@ -667,7 +784,6 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService(provider: provider),
             kSecAttrAccount as String: NSUserName(),
-            kSecUseDataProtectionKeychain as String: true,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -683,11 +799,9 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService(provider: provider),
             kSecAttrAccount as String: NSUserName(),
-            kSecUseDataProtectionKeychain as String: true,
         ]
         let attributes: [String: Any] = [
             kSecValueData as String: Data(key.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status != errSecItemNotFound { return status }
@@ -699,6 +813,7 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func updateAIFieldState() {
         aiKeyField?.isEnabled = aiEnabledButton?.state == .on
         aiProviderPopup?.isEnabled = aiEnabledButton?.state == .on
+        saveAPIKeyButton?.isEnabled = aiEnabledButton?.state == .on
         getAPIKeyButton?.isEnabled = aiEnabledButton?.state == .on
     }
 
@@ -711,11 +826,54 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc private func aiProviderChanged() {
         let previous = activeAIProvider
         let previousKey = aiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !previousKey.isEmpty { _ = saveAPIKey(previousKey, provider: previous) }
+        apiKeyDrafts[previous] = previousKey
         activeAIProvider = aiProviderPopup.indexOfSelectedItem == 1 ? "openai" : "groq"
         UserDefaults.standard.set(activeAIProvider, forKey: aiProviderDefaultsKey)
-        aiKeyField.stringValue = loadAPIKey(provider: activeAIProvider)
+        let storedOrDraft = apiKeyDrafts[activeAIProvider] ?? loadAPIKey(provider: activeAIProvider)
+        apiKeyDrafts[activeAIProvider] = storedOrDraft
+        aiKeyField.stringValue = storedOrDraft
+        setAPIKeySavedAppearance(!storedOrDraft.isEmpty)
         updateAIProviderUI()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField, field === aiKeyField else { return }
+        apiKeyDrafts[activeAIProvider] = field.stringValue
+        setAPIKeySavedAppearance(false)
+    }
+
+    private func setAPIKeySavedAppearance(_ saved: Bool) {
+        saveAPIKeyButton?.title = saved ? "已保存" : "保存 Key"
+        saveAPIKeyButton?.contentTintColor = saved ? .systemGreen : .controlTextColor
+    }
+
+    private func validAPIKey(_ key: String, provider: String) -> Bool {
+        key.hasPrefix(providerKeyPrefix(provider)) && key.count >= 20
+    }
+
+    @objc private func saveSelectedAPIKey() {
+        let key = aiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let providerName = providerDisplayName(activeAIProvider)
+        guard validAPIKey(key, provider: activeAIProvider) else {
+            showAlert(
+                title: "API Key 格式不正确",
+                message: "请粘贴完整的、以 \(providerKeyPrefix(activeAIProvider)) 开头的 \(providerName) API Key。"
+            )
+            window.makeFirstResponder(aiKeyField)
+            return
+        }
+        let status = saveAPIKey(key, provider: activeAIProvider)
+        guard status == errSecSuccess else {
+            setAPIKeySavedAppearance(false)
+            showAlert(
+                title: "无法保存 API Key",
+                message: "macOS 钥匙串未能保存密钥（错误码 \(status)）。本次仍可使用，但下次打开应用需要重新输入。"
+            )
+            return
+        }
+        apiKeyDrafts[activeAIProvider] = key
+        setAPIKeySavedAppearance(true)
+        appendEvent("\(providerName) API Key 已安全保存到 macOS 钥匙串。", color: .systemGreen, weight: .medium)
     }
 
     @objc private func openSelectedAPIKeyPage() {
@@ -757,7 +915,7 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         let providerName = providerDisplayName(activeAIProvider)
         let keyPrefix = providerKeyPrefix(activeAIProvider)
-        if aiEnabled && (!aiAPIKey.hasPrefix(keyPrefix) || aiAPIKey.count < 20) {
+        if aiEnabled && !validAPIKey(aiAPIKey, provider: activeAIProvider) {
             showAlert(
                 title: "需要 \(providerName) API Key",
                 message: "要为没有 YouTube 字幕的视频生成 AI 字幕，请输入完整的、以 \(keyPrefix) 开头的 \(providerName) API Key；或者取消勾选 AI 字幕功能。"
@@ -800,6 +958,10 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 let keychainStatus = saveAPIKey(aiAPIKey, provider: activeAIProvider)
                 if keychainStatus != errSecSuccess {
                     keychainWarning = "本次可以正常使用 AI 字幕，但密钥未能保存到钥匙串；下次打开应用时需要重新输入（错误码 \(keychainStatus)）。"
+                    setAPIKeySavedAppearance(false)
+                } else {
+                    apiKeyDrafts[activeAIProvider] = aiAPIKey
+                    setAPIKeySavedAppearance(true)
                 }
             }
             requestedBatchSize = batchSize
@@ -1257,6 +1419,9 @@ final class CaptionAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         batchField.isEnabled = !running
         proxyField.isEnabled = !running
         aiKeyField.isEnabled = !running && aiEnabledButton.state == .on
+        aiProviderPopup.isEnabled = !running && aiEnabledButton.state == .on
+        saveAPIKeyButton.isEnabled = !running && aiEnabledButton.state == .on
+        getAPIKeyButton.isEnabled = !running && aiEnabledButton.state == .on
         aiEnabledButton.isEnabled = !running
         chooseArchiveButton.isEnabled = !running
         if running { openButton.isEnabled = false }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows desktop UI for YouTube Caption Archive."""
+"""Windows desktop UI for YouTube Transcript."""
 
 from __future__ import annotations
 
@@ -127,6 +127,7 @@ class CaptionApp:
         self.paused = False
         self.started_at = 0.0
         self.last_page = "index.html"
+        self.channel_file: Path | None = None
         self.processed = 0
         self.total = 0
         self.had_warnings = False
@@ -216,8 +217,16 @@ class CaptionApp:
         self.ai_key_entry = tk.Entry(card, textvariable=self.ai_key, relief="solid", bd=1,
                                      font=("Microsoft YaHei UI", 10), show="•")
         self.ai_key_entry.grid(row=4, column=1, sticky="ew", ipady=7, pady=(11, 0))
-        ttk.Button(card, text="获取 API Key", style="App.TButton", command=self.open_api_key_page).grid(
-            row=4, column=2, padx=(10, 0), pady=(11, 0))
+        self.ai_key_actions = tk.Frame(card, bg="white")
+        self.ai_key_actions.grid(row=4, column=2, padx=(10, 0), pady=(11, 0))
+        self.save_ai_key_btn = ttk.Button(
+            self.ai_key_actions, text="保存 Key", style="App.TButton", command=self.save_ai_key
+        )
+        self.save_ai_key_btn.pack(side="left")
+        self.get_ai_key_btn = ttk.Button(
+            self.ai_key_actions, text="获取 API Key", style="App.TButton", command=self.open_api_key_page
+        )
+        self.get_ai_key_btn.pack(side="left", padx=(7, 0))
         tk.Checkbutton(
             card,
             text="勾选后若 YouTube 无字幕，系统将自动生成 AI 字幕（支持中文、英语等 99+ 种语言）",
@@ -279,6 +288,9 @@ class CaptionApp:
         if hasattr(self, "ai_key_entry"):
             self.ai_key_entry.configure(state="normal" if self.ai_enabled.get() else "disabled")
             self.ai_provider_box.configure(state="readonly" if self.ai_enabled.get() else "disabled")
+            state = "normal" if self.ai_enabled.get() else "disabled"
+            self.save_ai_key_btn.configure(state=state)
+            self.get_ai_key_btn.configure(state=state)
 
     def provider_changed(self, _event=None):
         previous = self.ai_provider_value
@@ -290,6 +302,26 @@ class CaptionApp:
     def open_api_key_page(self):
         url = "https://platform.openai.com/api-keys" if self.ai_provider.get() == "openai" else "https://console.groq.com/keys"
         webbrowser.open(url)
+
+    def save_ai_key(self):
+        key = self.ai_key.get().strip()
+        provider = self.ai_provider.get()
+        provider_name = "OpenAI" if provider == "openai" else "Groq"
+        prefix = "sk-" if provider == "openai" else "gsk_"
+        if not key.startswith(prefix) or len(key) < 20:
+            messagebox.showwarning(
+                APP_NAME,
+                f"请粘贴完整的、以 {prefix} 开头的 {provider_name} API Key。",
+            )
+            self.ai_key_entry.focus_set()
+            return
+        try:
+            self.settings[f"{provider}_key_encrypted"] = protect_secret(key)
+            self.save_settings()
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"无法安全保存 API Key：\n{exc}")
+            return
+        messagebox.showinfo(APP_NAME, f"{provider_name} API Key 已安全保存。")
 
     def build_menu(self):
         menu = tk.Menu(self.root)
@@ -306,6 +338,7 @@ class CaptionApp:
         menu.add_cascade(label="任务", menu=task_menu)
         settings_menu = tk.Menu(menu, tearoff=False)
         settings_menu.add_command(label="网络代理…", command=self.configure_proxy)
+        settings_menu.add_command(label="保存当前 API Key", command=self.save_ai_key)
         menu.add_cascade(label="设置", menu=settings_menu)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(label="获取 Groq API Key", command=lambda: webbrowser.open("https://console.groq.com/keys"))
@@ -376,8 +409,9 @@ class CaptionApp:
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"无法安全保存 AI Key：\n{exc}")
             return
-        channel_file = Path(tempfile.gettempdir()) / "youtube-caption-channel-url.txt"
+        channel_file = Path(tempfile.gettempdir()) / f"youtube-caption-channel-{os.getpid()}.txt"
         channel_file.write_text(url, encoding="utf-8")
+        self.channel_file = channel_file
         command = self.backend_command() + ["--channel-file", str(channel_file), "--output", str(self.archive),
                                             "--batch-size", str(count), "--event-format", "jsonl", "--open-after"]
         if ai_enabled:
@@ -395,6 +429,7 @@ class CaptionApp:
                                             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
                                             bufsize=1, env=environment, **self.hidden_options())
         except OSError as exc:
+            self.remove_channel_file()
             messagebox.showerror(APP_NAME, f"无法启动抓取程序：\n{exc}")
             return
         self.started_at, self.processed, self.total, self.paused = time.time(), 0, 0, False
@@ -533,6 +568,16 @@ class CaptionApp:
         if code == 0 and self.total and not self.had_warnings:
             self.progress.configure(mode="determinate", maximum=max(self.total, 1), value=max(self.processed, self.total))
         self.process = None
+        self.remove_channel_file()
+
+    def remove_channel_file(self):
+        if not self.channel_file:
+            return
+        try:
+            self.channel_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self.channel_file = None
 
     def open_results(self):
         index = self.archive / "index.html"
@@ -553,6 +598,7 @@ class CaptionApp:
             for item in self.process_tree():
                 try: item.terminate()
                 except Exception: pass
+        self.remove_channel_file()
         self.root.destroy()
 
 

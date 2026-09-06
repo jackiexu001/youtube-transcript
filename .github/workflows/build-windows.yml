@@ -15,7 +15,7 @@ jobs:
       - name: Run Python regression tests
         shell: powershell
         run: |
-          python -m unittest -v test_youtube_caption.py
+          python -m unittest -v test_youtube_caption.py test_desktop_release.py
           python -m unittest discover -s mvp -p "test_*.py" -v
       - name: Install Inno Setup
         shell: powershell

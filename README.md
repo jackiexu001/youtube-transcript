@@ -1,4 +1,4 @@
-# youtube-transcript
+# YouTube Transcript
 
 把 YouTube 频道的视频列表、字幕和基础互动数据整理成本地 HTML 档案：左边播放 YouTube 视频，右边阅读逐字字幕；没有 YouTube 字幕时，可使用 Groq 或 OpenAI 的 Whisper 服务自动生成带时间轴的 AI 字幕，支持中文、英语等 99+ 种语言。
 
@@ -45,11 +45,13 @@ DMG 使用传统 Mac 安装布局：左侧是应用，右侧 `Applications` 是�
 如果你不想输入命令：
 
 - macOS：双击 `YouTube Transcript.app`。它是原生 macOS 界面，让你粘贴频道地址、设置本次数量、选择档案位置，并实时显示抓取进度；抓取过程中可以暂停、继续或停止，不会打开 Terminal。
-- Windows：从网站下载 `YouTube-Transcript-2.3.0-Windows-x64-Setup.exe`，按安装向导完成安装，再从开始菜单打开“YouTube Transcript”。不需要另装 Python、yt-dlp 或 FFmpeg。
+- Windows：从网站下载 `YouTube-Transcript-2.3.1-Windows-x64-Setup.exe`，按安装向导完成安装，再从开始菜单打开“YouTube Transcript”。不需要另装 Python、yt-dlp 或 FFmpeg。
 
 然后粘贴 YouTube 博主主页链接，例如 `https://www.youtube.com/@handle`。首次运行默认保存到“文稿/YouTube 字幕学习档案”，也可以在应用里选择已有档案目录；抓完后会打开刚处理的博主页面。
 
 如果启用“无 YouTube 字幕时自动生成 AI 字幕”，可选择 Groq（默认、速度优先）或 OpenAI Whisper，并粘贴对应 API Key。两者均支持中文、英语等 99+ 种语言并自动识别语种。界面的“获取 API Key”会打开服务商官方平台。不同服务的 Key 分开加密保存，不会写入字幕档案或运行日志。若只想保存 YouTube 自带字幕和无字幕播放页，可以取消勾选该功能。
+
+粘贴 API Key 后点击“保存 Key”，界面显示“已保存”即表示保存成功。macOS 使用系统钥匙串，Windows 使用当前账户的 DPAPI 加密保存。如果 macOS 搜索出现两个同名应用，通常是安装磁盘尚未推出；推出安装磁盘、删除下载的 DMG，并从“应用程序”文件夹删除旧版“开始抓取 YouTube 字幕”即可，字幕档案不会受影响。
 
 “网络代理”通常留空即可，应用会自动读取系统设置。如果浏览器可以打开 YouTube、应用却无法读取频道，可以填写代理软件显示的本机代理地址，例如 `http://127.0.0.1:端口`。包含账号密码的代理不会被应用记住，日志也会隐藏认证信息。
 
@@ -88,6 +90,8 @@ py -3 youtube_caption.py --channel "https://www.youtube.com/@handle" --output ar
 ```bash
 ./macos/build_macos_app.sh
 ```
+
+调试应用会生成在 `.build/Products.noindex/YouTube Transcript.app`。该目录不会被 Spotlight 当作另一份已安装应用展示；普通用户仍应从 DMG 安装到“应用程序”。
 
 生成网站分发用的通用 DMG：
 
@@ -144,8 +148,8 @@ python3 youtube_caption.py --config channels.json --output archive
 脚本会创建隔离环境、下载官方 `yt-dlp.exe`，分别打包无窗口图形应用和后端，并生成标准安装程序及 SHA-256：
 
 ```text
-release\windows\YouTube-Transcript-2.3.0-Windows-x64-Setup.exe
-release\windows\YouTube-Transcript-2.3.0-Windows-x64-Setup.exe.sha256
+release\windows\YouTube-Transcript-2.3.1-Windows-x64-Setup.exe
+release\windows\YouTube-Transcript-2.3.1-Windows-x64-Setup.exe.sha256
 ```
 
 也可以把代码推送到 GitHub 后，手动运行 `Build Windows installer` 工作流，在构建产物中下载相同的安装包。PyInstaller 不支持在 macOS 上直接生成 Windows 可执行文件，因此最后的 EXE 必须由 Windows 构建机或 Windows GitHub Actions 生成。
@@ -226,6 +230,8 @@ archive/
 请使用这个项目抓取 https://www.youtube.com/@handle 的全部视频列表和字幕。
 默认不要下载视频，输出到 archive，生成 HTML 页面、频道列表、videos.csv，并使用增量更新。
 ```
+
+如果你的助手支持 skill，可以把 `skills/youtube-caption-archive/SKILL.md` 安装到对应的 skills 目录中。
 
 ## 许可
 

@@ -6,6 +6,7 @@ venv/
 dist/
 build/
 .build/
+.legacy-residue.noindex/
 release/
 checkpoints/
 *.spec
@@ -15,6 +16,8 @@ checkpoints/
 channels.json
 archive/
 .youtube-caption-channel-url.txt
+.youtube-caption-server.json
+.youtube-caption-open.log
 */.caption-archive.json
 */videos.csv
 */*.html

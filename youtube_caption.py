@@ -65,7 +65,8 @@ def emit_event(event, message="", level="info", **data):
 def redact_secrets(value):
     text = str(value or "")
     text = re.sub(r"(https?://)[^/@\s:]+:[^/@\s]+@", r"\1***:***@", text)
-    return re.sub(r"gsk_[A-Za-z0-9_-]+", "gsk_***", text)
+    text = re.sub(r"gsk_[A-Za-z0-9_-]+", "gsk_***", text)
+    return re.sub(r"\bsk-[A-Za-z0-9_-]{16,}", "sk-***", text)
 
 
 def classify_request_error(detail):
@@ -1471,7 +1472,7 @@ def main():
             output=str(root),
         )
         raise SystemExit(4)
-    if (root / "channels.json").exists():
+    if args.install_launchers and (root / "channels.json").exists():
         write_update_launcher(root)
     # Launcher installation is a packaging operation, not part of an archive
     # run.  Keeping it opt-in prevents a bundled app from rebuilding itself or
