@@ -43,7 +43,7 @@ jobs:
           if ($app.HasExited) { throw "Installed desktop application exited during startup." }
           Stop-Process -Id $app.Id -Force
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: YouTube-Transcript-Windows-x64
           path: |
