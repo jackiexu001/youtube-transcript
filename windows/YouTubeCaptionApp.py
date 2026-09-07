@@ -26,21 +26,6 @@ APP_NAME = "YouTube Transcript"
 CREATE_NO_WINDOW = 0x08000000
 
 
-def enable_windows_dpi_awareness() -> None:
-    """Keep text and controls crisp on 125%-200% Windows displays."""
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-    except Exception:
-        try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-
-
 def protect_secret(value: str) -> str:
     """Encrypt a secret for the current Windows user with DPAPI."""
     if os.name != "nt" or not value:
@@ -183,39 +168,33 @@ class CaptionApp:
 
     def build_ui(self) -> None:
         self.root.title(APP_NAME)
-        self.root.geometry("1120x860")
-        self.root.minsize(900, 720)
-        self.root.configure(bg="#F2F3F5")
+        self.root.geometry("980x820")
+        self.root.minsize(820, 710)
+        self.root.configure(bg="#F3F6FA")
         style = ttk.Style()
         if "vista" in style.theme_names():
             style.theme_use("vista")
+        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 11, "bold"), padding=(18, 9))
         style.configure("App.TButton", font=("Microsoft YaHei UI", 10), padding=(14, 8))
-        style.configure("App.TCombobox", font=("Microsoft YaHei UI", 10), padding=5)
-        style.configure("Accent.Horizontal.TProgressbar", troughcolor="#E3E6EA", background="#F07C54")
+        style.configure("App.TLabel", background="#F3F6FA", font=("Microsoft YaHei UI", 10))
 
-        shell = tk.Frame(self.root, bg="#F2F3F5", padx=36, pady=24)
+        shell = tk.Frame(self.root, bg="#F3F6FA", padx=34, pady=26)
         shell.pack(fill="both", expand=True)
-        self.shell = shell
-        self.root.bind("<Configure>", self.update_responsive_padding)
         self.build_menu()
-
-        header = tk.Frame(shell, bg="#F2F3F5")
-        header.pack(fill="x", pady=(0, 18))
-        logo = tk.Canvas(header, width=66, height=66, bg="#F2F3F5", highlightthickness=0)
+        header = tk.Frame(shell, bg="#F3F6FA")
+        header.pack(fill="x")
+        logo = tk.Canvas(header, width=58, height=58, bg="#F3F6FA", highlightthickness=0)
         logo.pack(side="left")
         logo.create_polygon(
-            3, 15, 3, 51, 15, 63, 51, 63, 63, 51, 63, 15, 51, 3, 15, 3,
+            3, 14, 3, 44, 14, 55, 44, 55, 55, 44, 55, 14, 44, 3, 14, 3,
             fill="#F07C54", outline="#F07C54", smooth=True,
         )
-        logo.create_polygon(25, 18, 25, 48, 49, 33, fill="white", outline="white")
-        heading = tk.Frame(header, bg="#F2F3F5")
-        heading.pack(side="left", padx=(16, 0))
-        tk.Label(heading, text=APP_NAME, bg="#F2F3F5", fg="#18191B",
-                 font=("Microsoft YaHei UI", 27, "bold")).pack(anchor="w")
-        tk.Label(heading, text="把公开视频与字幕整理成本地学习档案", bg="#F2F3F5", fg="#74777C",
-                 font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(3, 0))
+        logo.create_polygon(22, 16, 22, 42, 43, 29, fill="white", outline="white")
+        tk.Label(header, text=APP_NAME, bg="#F3F6FA", fg="#172033",
+                 font=("Microsoft YaHei UI", 25, "bold")).pack(side="left", padx=(14, 0))
+        tk.Frame(shell, bg="#F3F6FA", height=14).pack(fill="x")
 
-        card = tk.Frame(shell, bg="white", highlightbackground="#E0E1E4", highlightthickness=1, padx=24, pady=18)
+        card = tk.Frame(shell, bg="white", highlightbackground="#DFE5EE", highlightthickness=1, padx=22, pady=18)
         card.pack(fill="x")
         card.columnconfigure(1, weight=1)
         self.channel = tk.StringVar()
@@ -238,8 +217,8 @@ class CaptionApp:
         tk.Label(card, text="AI 服务", bg="white", fg="#273247", font=("Microsoft YaHei UI", 10, "bold")).grid(
             row=3, column=0, sticky="w", pady=(11, 0), padx=(0, 18))
         self.ai_provider_box = ttk.Combobox(card, textvariable=self.ai_provider, state="readonly",
-                                            values=("groq", "openai"), width=20, style="App.TCombobox")
-        self.ai_provider_box.grid(row=3, column=1, sticky="w", pady=(11, 0), ipady=4)
+                                            values=("groq", "openai"))
+        self.ai_provider_box.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(11, 0), ipady=5)
         self.ai_provider_box.bind("<<ComboboxSelected>>", self.provider_changed)
         tk.Label(card, text="API Key", bg="white", fg="#273247", font=("Microsoft YaHei UI", 10, "bold")).grid(
             row=4, column=0, sticky="w", pady=(11, 0), padx=(0, 18))
@@ -268,11 +247,9 @@ class CaptionApp:
         ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
         self.toggle_ai()
 
-        buttons = tk.Frame(shell, bg="#F2F3F5")
-        buttons.pack(fill="x", pady=(14, 12))
-        self.start_btn = tk.Button(buttons, text="▶  开始抓取", command=self.start, bg="#18191B", fg="white",
-                                   activebackground="#303236", activeforeground="white", relief="flat",
-                                   font=("Microsoft YaHei UI", 10, "bold"), padx=18, pady=9, cursor="hand2")
+        buttons = tk.Frame(shell, bg="#F3F6FA")
+        buttons.pack(fill="x", pady=16)
+        self.start_btn = ttk.Button(buttons, text="开始抓取", style="Primary.TButton", command=self.start)
         self.start_btn.pack(side="left")
         self.open_btn = ttk.Button(buttons, text="打开结果", style="App.TButton", command=self.open_results)
         self.open_btn.pack(side="left", padx=8)
@@ -282,30 +259,20 @@ class CaptionApp:
         self.stop_btn.pack(side="left", padx=8)
         ttk.Button(buttons, text="关闭应用", style="App.TButton", command=self.close_app).pack(side="right")
 
-        metrics_row = tk.Frame(shell, bg="#F2F3F5")
-        metrics_row.pack(fill="x", pady=(0, 14))
-        self.processed_metric = tk.StringVar(value="0 / —")
-        self.position_metric = tk.StringVar(value="—")
-        self.elapsed_metric = tk.StringVar(value="00:00")
-        self.metric_card(metrics_row, "✓", "本次已处理", self.processed_metric, "#35B66A").pack(
-            side="left", fill="x", expand=True, padx=(0, 7))
-        self.metric_card(metrics_row, "☷", "频道位置", self.position_metric, "#2589F5").pack(
-            side="left", fill="x", expand=True, padx=7)
-        self.metric_card(metrics_row, "◷", "运行时间", self.elapsed_metric, "#F08A24").pack(
-            side="left", fill="x", expand=True, padx=(7, 0))
-
-        status_row = tk.Frame(shell, bg="#F2F3F5")
+        status_row = tk.Frame(shell, bg="#F3F6FA")
         status_row.pack(fill="x")
-        tk.Label(status_row, text="抓取进度", bg="#F2F3F5", fg="#242629",
+        tk.Label(status_row, text="抓取进度", bg="#F3F6FA", fg="#273247",
                  font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
         self.status = tk.StringVar(value="准备就绪")
-        tk.Label(status_row, textvariable=self.status, bg="#F2F3F5", fg="#74777C",
+        tk.Label(status_row, textvariable=self.status, bg="#F3F6FA", fg="#657087",
                  font=("Microsoft YaHei UI", 10)).pack(side="right")
-        self.progress = ttk.Progressbar(shell, mode="determinate", maximum=100,
-                                        style="Accent.Horizontal.TProgressbar")
-        self.progress.pack(fill="x", pady=(8, 14))
+        self.progress = ttk.Progressbar(shell, mode="determinate", maximum=100)
+        self.progress.pack(fill="x", pady=(8, 10))
+        self.metrics = tk.StringVar(value="已处理 0 条   ·   当前位置 —   ·   已用时 00:00")
+        tk.Label(shell, textvariable=self.metrics, bg="#F3F6FA", fg="#687386",
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(0, 10))
 
-        tk.Label(shell, text="运行日志", bg="#F2F3F5", fg="#242629",
+        tk.Label(shell, text="运行日志", bg="#F3F6FA", fg="#273247",
                  font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w")
         log_frame = tk.Frame(shell, bg="white", highlightbackground="#DFE5EE", highlightthickness=1)
         log_frame.pack(fill="both", expand=True, pady=(8, 0))
@@ -315,20 +282,6 @@ class CaptionApp:
                            padx=14, pady=12, font=("Microsoft YaHei UI", 9), yscrollcommand=scroll.set)
         self.log.pack(fill="both", expand=True)
         scroll.config(command=self.log.yview)
-
-    def update_responsive_padding(self, event):
-        if event.widget is self.root and hasattr(self, "shell"):
-            side = max(28, (event.width - 1180) // 2)
-            self.shell.configure(padx=side)
-
-    def metric_card(self, parent, icon, label, value, accent):
-        card = tk.Frame(parent, bg="white", highlightbackground="#E0E1E4", highlightthickness=1,
-                        padx=18, pady=12)
-        tk.Label(card, text=f"{icon}  {label}", bg="white", fg=accent,
-                 font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w")
-        tk.Label(card, textvariable=value, bg="white", fg="#242629",
-                 font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", pady=(5, 0))
-        return card
 
     def add_row(self, card, row, label, variable, placeholder, width=None, show=None):
         tk.Label(card, text=label, bg="white", fg="#273247", font=("Microsoft YaHei UI", 10, "bold")).grid(
@@ -514,9 +467,7 @@ class CaptionApp:
             pass
         if self.process and self.process.poll() is None:
             elapsed = int(time.time() - self.started_at)
-            self.processed_metric.set(f"{self.processed} / {self.total or '—'}")
-            self.position_metric.set(f"{self.processed}/{self.total or '—'}")
-            self.elapsed_metric.set(f"{elapsed // 60:02d}:{elapsed % 60:02d}")
+            self.metrics.set(f"已处理 {self.processed} 条   ·   当前位置 {self.processed}/{self.total or '—'}   ·   已用时 {elapsed // 60:02d}:{elapsed % 60:02d}")
         self.root.after(100, self.poll_events)
 
     def handle_line(self, line):
@@ -554,8 +505,6 @@ class CaptionApp:
             requested = int(self.batch.get() or "0")
             progress_total = min(self.total, requested) if requested > 0 else self.total
             self.progress.configure(maximum=max(progress_total, 1), value=self.processed)
-            self.processed_metric.set(f"{self.processed} / {progress_total or '—'}")
-            self.position_metric.set(f"{self.processed}/{self.total or '—'}")
         elif name == "channel_completed":
             folder = str(event.get("folder", "")).strip()
             if folder:
@@ -668,7 +617,6 @@ class CaptionApp:
 
 
 def main() -> None:
-    enable_windows_dpi_awareness()
     root = tk.Tk()
     CaptionApp(root)
     root.mainloop()

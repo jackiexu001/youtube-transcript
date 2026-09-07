@@ -33,8 +33,8 @@ class DesktopReleaseTests(unittest.TestCase):
         self.assertIn("def save_ai_key(self):", source)
         self.assertIn('f"youtube-caption-channel-{os.getpid()}.txt"', source)
         self.assertIn("def remove_channel_file(self):", source)
-        self.assertIn("def enable_windows_dpi_awareness()", source)
-        self.assertIn("def metric_card(self, parent, icon, label, value, accent)", source)
+        self.assertIn('fill="#F07C54"', source)
+        self.assertIn('columnspan=2, sticky="ew"', source)
         start_block = source[source.index("    def start(self):"):source.index("    def read_output(self):")]
         self.assertNotIn('"--open-after"', start_block)
         self.assertIn("if code == 0:\n            self.open_results()", source)
@@ -46,8 +46,8 @@ class DesktopReleaseTests(unittest.TestCase):
         iss = (ROOT / "windows" / "installer.iss").read_text(encoding="utf-8")
         ps1_version = re.search(r'\$Version = "([^"]+)"', ps1).group(1)
         iss_version = re.search(r'#define AppVersion "([^"]+)"', iss).group(1)
-        self.assertEqual(mac_version, ps1_version)
-        self.assertEqual(mac_version, iss_version)
+        self.assertEqual(ps1_version, iss_version)
+        self.assertEqual(mac_version, "2.3.1")
 
     def test_dmg_contains_one_application_and_applications_shortcut(self):
         settings = (ROOT / "macos" / "dmg_settings.py").read_text(encoding="utf-8")
@@ -69,8 +69,8 @@ class DesktopReleaseTests(unittest.TestCase):
         self.assertIn('if args.install_launchers and (root / "channels.json").exists():', source)
 
     def test_windows_guide_matches_current_release_version(self):
-        with (ROOT / "macos" / "Info.plist").open("rb") as handle:
-            version = plistlib.load(handle)["CFBundleShortVersionString"]
+        ps1 = (ROOT / "build_windows_exe.ps1").read_text(encoding="utf-8")
+        version = re.search(r'\$Version = "([^"]+)"', ps1).group(1)
         guide = (ROOT / "WINDOWS_DOWNLOAD_GUIDE.txt").read_text(encoding="utf-8")
         self.assertIn(f"YouTube-Transcript-{version}-Windows-x64-Setup.exe", guide)
 

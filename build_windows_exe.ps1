@@ -1,4 +1,4 @@
-param([string]$Version = "2.3.2", [switch]$SkipInstaller)
+param([string]$Version = "2.3.1.1", [switch]$SkipInstaller)
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot

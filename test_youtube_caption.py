@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -71,6 +72,23 @@ class NetworkReliabilityTests(unittest.TestCase):
         self.assertIn("--extractor-args", fallback_command)
         self.assertIn("youtube:player_client=android_vr,web_embedded,tv_simply", fallback_command)
 
+    def test_ytdlp_caption_fallback_parses_json3(self):
+        def create_caption(command, **_kwargs):
+            template = Path(command[command.index("--output") + 1])
+            caption = template.with_name(template.name + ".en.json3")
+            caption.write_text(
+                json.dumps({"events": [{"tStartMs": 1250, "segs": [{"utf8": "Hello"}]}]}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch.object(archive.subprocess, "run", side_effect=create_caption) as run:
+            segments = archive.fetch_segments_with_ytdlp("rUhllpnYWR8", "en", "YouTube 自动字幕")
+        self.assertEqual(segments, [(1.25, "Hello")])
+        command = run.call_args.args[0]
+        self.assertIn("--write-auto-subs", command)
+        self.assertIn("--extractor-args", command)
+
     def test_retry_queue_round_trip_and_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
@@ -135,6 +153,30 @@ class NetworkReliabilityTests(unittest.TestCase):
                 )
             self.assertFalse(archive.retry_queue_path(folder).exists())
             self.assertTrue((folder / "2026-09-06_first.html").exists())
+
+    def test_channel_uses_ytdlp_when_direct_caption_url_is_rejected(self):
+        playlist = {"channel": "TED", "entries": [{"id": "first", "title": "English talk"}]}
+        info = {
+            "id": "first",
+            "title": "English talk",
+            "upload_date": "20260907",
+            "subtitles": {},
+            "automatic_captions": {"en": [{"ext": "json3", "url": "https://example.invalid/caption"}]},
+        }
+        rejected = archive.ArchiveRequestError("youtube_error", "字幕直链被拒绝", retryable=False)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            archive, "run_json", side_effect=[playlist, info]
+        ), mock.patch.object(archive, "fetch_segments", side_effect=rejected), mock.patch.object(
+            archive, "fetch_segments_with_ytdlp", return_value=[(1.0, "Recovered caption")]
+        ) as fallback:
+            root = Path(directory)
+            archive.process_channel(
+                root,
+                {"url": "https://www.youtube.com/@TED", "delay_seconds": 0, "languages": ["en"]},
+            )
+            page = (root / "TED" / "2026-09-07_first.html").read_text(encoding="utf-8")
+        fallback.assert_called_once_with("first", "en", "YouTube 自动字幕")
+        self.assertIn("Recovered caption", page)
 
     def test_ai_captions_replace_no_subtitle_page(self):
         playlist = {"channel": "测试频道", "entries": [{"id": "first", "title": "第一条"}]}

@@ -18,6 +18,7 @@ import functools
 import http.server
 import socket
 import socketserver
+import tempfile
 import threading
 import webbrowser
 from datetime import datetime
@@ -100,7 +101,7 @@ def configured_proxy(explicit=None):
     return proxies.get("https") or proxies.get("http") or proxies.get("all")
 
 
-def run_json(args, attempts=YTDLP_ATTEMPTS):
+def ytdlp_executable():
     bundled = os.environ.get("YCA_YTDLP")
     if not bundled and getattr(sys, "frozen", False):
         executable_dir = Path(sys.executable).resolve().parent
@@ -110,8 +111,22 @@ def run_json(args, attempts=YTDLP_ATTEMPTS):
             executable_dir.parent / "Resources" / "yt-dlp_macos",
         )
         bundled = next((str(candidate) for candidate in candidates if candidate.is_file()), None)
+    return bundled or "yt-dlp"
+
+
+def ytdlp_environment():
+    env = os.environ.copy()
+    env.pop("GROQ_API_KEY", None)
+    env.pop("OPENAI_API_KEY", None)
+    env.pop("YCA_AI_API_KEY", None)
+    extra_paths = ["/opt/homebrew/bin", "/usr/local/bin"]
+    env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
+    return env
+
+
+def run_json(args, attempts=YTDLP_ATTEMPTS):
     base_command = [
-        bundled or "yt-dlp",
+        ytdlp_executable(),
         "--quiet",
         "--no-warnings",
         "--socket-timeout",
@@ -123,12 +138,7 @@ def run_json(args, attempts=YTDLP_ATTEMPTS):
     ]
     if ACTIVE_PROXY:
         base_command.extend(["--proxy", ACTIVE_PROXY])
-    env = os.environ.copy()
-    env.pop("GROQ_API_KEY", None)
-    env.pop("OPENAI_API_KEY", None)
-    env.pop("YCA_AI_API_KEY", None)
-    extra_paths = ["/opt/homebrew/bin", "/usr/local/bin"]
-    env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
+    env = ytdlp_environment()
     def execute(command_args, command_attempts):
         command = base_command + list(command_args)
         last_error = None
@@ -355,6 +365,16 @@ def choose_track(info, languages):
     return None
 
 
+def caption_segments(data):
+    segments = []
+    for event in data.get("events", []):
+        parts = event.get("segs") or []
+        text = "".join(part.get("utf8", "") for part in parts).replace("\n", " ").strip()
+        if text and text != "[音乐]":
+            segments.append((event.get("tStartMs", 0) / 1000, text))
+    return segments
+
+
 def fetch_segments(url):
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     handlers = []
@@ -380,13 +400,73 @@ def fetch_segments(url):
                 attempts=YTDLP_ATTEMPTS,
             )
             time.sleep(attempt * 2)
-    segments = []
-    for event in data.get("events", []):
-        parts = event.get("segs") or []
-        text = "".join(part.get("utf8", "") for part in parts).replace("\n", " ").strip()
-        if text and text != "[音乐]":
-            segments.append((event.get("tStartMs", 0) / 1000, text))
-    return segments
+    return caption_segments(data)
+
+
+def fetch_segments_with_ytdlp(video_id, language, source):
+    """Let yt-dlp fetch a caption when a timedtext URL is rejected directly."""
+    with tempfile.TemporaryDirectory(prefix="youtube-transcript-caption-") as directory:
+        template = str(Path(directory) / "caption")
+        command = [
+            ytdlp_executable(),
+            "--quiet",
+            "--no-warnings",
+            "--socket-timeout",
+            str(YTDLP_SOCKET_TIMEOUT_SECONDS),
+            "--retries",
+            "2",
+            "--extractor-retries",
+            "2",
+            "--extractor-args",
+            "youtube:player_client=android_vr,web_embedded,tv_simply",
+            "--skip-download",
+            "--sub-langs",
+            language,
+            "--sub-format",
+            "json3",
+            "--output",
+            template,
+            "--write-auto-subs" if "自动" in source else "--write-subs",
+            "https://www.youtube.com/watch?v={}".format(video_id),
+        ]
+        if ACTIVE_PROXY:
+            command[1:1] = ["--proxy", ACTIVE_PROXY]
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                env=ytdlp_environment(),
+                timeout=YTDLP_TOTAL_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ArchiveRequestError(
+                "timeout", "字幕下载超时，当前视频已加入待重试队列。", str(exc), True
+            ) from exc
+        if result.returncode != 0:
+            detail = result.stderr or result.stdout or "yt-dlp 字幕下载失败"
+            code, message, retryable, safe_detail = classify_request_error(detail)
+            raise ArchiveRequestError(code, message, safe_detail[-600:], retryable)
+        files = list(Path(directory).glob("*.json3"))
+        if not files:
+            raise ArchiveRequestError(
+                "caption_download_error",
+                "YouTube 返回了字幕信息，但字幕文件暂时无法下载，已加入待重试队列。",
+                "yt-dlp did not create a json3 subtitle file",
+                True,
+            )
+        try:
+            return caption_segments(json.loads(files[0].read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            raise ArchiveRequestError(
+                "caption_parse_error",
+                "字幕文件格式异常，当前视频已加入待重试队列。",
+                str(exc),
+                True,
+            ) from exc
 
 
 STYLE = """
@@ -1321,7 +1401,22 @@ def process_channel(
                     archive[video_id] = {"status": "no_subtitles", "title": info.get("title", video_id), "date": display_date, "published_at": publish_time, **stats, "source": "无字幕", "file": filename}
             else:
                 source, language, subtitle_url = selected
-                segments = fetch_segments(subtitle_url)
+                try:
+                    segments = fetch_segments(subtitle_url)
+                except ArchiveRequestError as direct_error:
+                    emit_event(
+                        "caption_client_fallback",
+                        "字幕链接被 YouTube 拒绝，正在由 yt-dlp 重新获取字幕文件……",
+                        level="warning",
+                        video_id=video_id,
+                        error_type=direct_error.code,
+                    )
+                    segments = fetch_segments_with_ytdlp(video_id, language, source)
+                    emit_event(
+                        "caption_client_recovered",
+                        "已通过 yt-dlp 恢复字幕下载。",
+                        video_id=video_id,
+                    )
                 date = info.get("upload_date") or ""
                 display_date = f"{date[:4]}-{date[4:6]}-{date[6:]}" if len(date) == 8 else date
                 filename = f"{display_date + '_' if display_date else ''}{video_id}.html"

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "2.3.2"
+  #define AppVersion "2.3.1.1"
 #endif
 #ifndef ProjectRoot
   #define ProjectRoot ".."
