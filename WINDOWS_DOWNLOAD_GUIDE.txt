@@ -1,6 +1,6 @@
 YouTube Transcript · Windows 安装说明
 
-1. 下载 YouTube-Transcript-2.3.1-Windows-x64-Setup.exe。
+1. 下载 YouTube-Transcript-2.3.2-Windows-x64-Setup.exe。
 2. 双击安装程序，按向导完成安装。
 3. 从开始菜单打开“YouTube Transcript”。
 4. 粘贴 YouTube 博主主页，填写本次抓取数量；如需为无字幕视频生成 AI 字幕，请选择 Groq 或 OpenAI 并输入对应 API Key。

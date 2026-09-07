@@ -56,6 +56,21 @@ class NetworkReliabilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "timeout")
         self.assertEqual(run.call_count, archive.YTDLP_ATTEMPTS)
 
+    def test_bot_check_uses_public_client_fallback(self):
+        blocked = subprocess.CompletedProcess(
+            ["yt-dlp"], 1, stdout="", stderr="Sign in to confirm you’re not a bot"
+        )
+        recovered = subprocess.CompletedProcess(
+            ["yt-dlp"], 0, stdout='{"id": "rUhllpnYWR8"}', stderr=""
+        )
+        with mock.patch.object(archive.subprocess, "run", side_effect=[blocked, recovered]) as run:
+            result = archive.run_json(["--dump-single-json", "https://youtu.be/rUhllpnYWR8"])
+        self.assertEqual(result["id"], "rUhllpnYWR8")
+        self.assertEqual(run.call_count, 2)
+        fallback_command = run.call_args_list[1].args[0]
+        self.assertIn("--extractor-args", fallback_command)
+        self.assertIn("youtube:player_client=android_vr,web_embedded,tv_simply", fallback_command)
+
     def test_retry_queue_round_trip_and_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

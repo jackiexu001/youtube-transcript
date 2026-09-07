@@ -45,7 +45,7 @@ DMG 使用传统 Mac 安装布局：左侧是应用，右侧 `Applications` 是�
 如果你不想输入命令：
 
 - macOS：双击 `YouTube Transcript.app`。它是原生 macOS 界面，让你粘贴频道地址、设置本次数量、选择档案位置，并实时显示抓取进度；抓取过程中可以暂停、继续或停止，不会打开 Terminal。
-- Windows：从网站下载 `YouTube-Transcript-2.3.1-Windows-x64-Setup.exe`，按安装向导完成安装，再从开始菜单打开“YouTube Transcript”。不需要另装 Python、yt-dlp 或 FFmpeg。
+- Windows：从网站下载 `YouTube-Transcript-2.3.2-Windows-x64-Setup.exe`，按安装向导完成安装，再从开始菜单打开“YouTube Transcript”。不需要另装 Python、yt-dlp 或 FFmpeg。
 
 然后粘贴 YouTube 博主主页链接，例如 `https://www.youtube.com/@handle`。首次运行默认保存到“文稿/YouTube 字幕学习档案”，也可以在应用里选择已有档案目录；抓完后会打开刚处理的博主页面。
 
@@ -148,8 +148,8 @@ python3 youtube_caption.py --config channels.json --output archive
 脚本会创建隔离环境、下载官方 `yt-dlp.exe`，分别打包无窗口图形应用和后端，并生成标准安装程序及 SHA-256：
 
 ```text
-release\windows\YouTube-Transcript-2.3.1-Windows-x64-Setup.exe
-release\windows\YouTube-Transcript-2.3.1-Windows-x64-Setup.exe.sha256
+release\windows\YouTube-Transcript-2.3.2-Windows-x64-Setup.exe
+release\windows\YouTube-Transcript-2.3.2-Windows-x64-Setup.exe.sha256
 ```
 
 也可以把代码推送到 GitHub 后，手动运行 `Build Windows installer` 工作流，在构建产物中下载相同的安装包。PyInstaller 不支持在 macOS 上直接生成 Windows 可执行文件，因此最后的 EXE 必须由 Windows 构建机或 Windows GitHub Actions 生成。

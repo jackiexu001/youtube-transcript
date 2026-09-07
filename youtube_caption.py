@@ -110,7 +110,7 @@ def run_json(args, attempts=YTDLP_ATTEMPTS):
             executable_dir.parent / "Resources" / "yt-dlp_macos",
         )
         bundled = next((str(candidate) for candidate in candidates if candidate.is_file()), None)
-    command = [
+    base_command = [
         bundled or "yt-dlp",
         "--quiet",
         "--no-warnings",
@@ -122,53 +122,84 @@ def run_json(args, attempts=YTDLP_ATTEMPTS):
         "2",
     ]
     if ACTIVE_PROXY:
-        command.extend(["--proxy", ACTIVE_PROXY])
-    command.extend(args)
+        base_command.extend(["--proxy", ACTIVE_PROXY])
     env = os.environ.copy()
     env.pop("GROQ_API_KEY", None)
     env.pop("OPENAI_API_KEY", None)
     env.pop("YCA_AI_API_KEY", None)
     extra_paths = ["/opt/homebrew/bin", "/usr/local/bin"]
     env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
-    last_error = None
-    for attempt in range(1, max(1, attempts) + 1):
-        try:
-            result = subprocess.run(
-                command,
-                check=False,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                env=env,
-                timeout=YTDLP_TOTAL_TIMEOUT_SECONDS,
+    def execute(command_args, command_attempts):
+        command = base_command + list(command_args)
+        last_error = None
+        for attempt in range(1, max(1, command_attempts) + 1):
+            try:
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    capture_output=True,
+                    env=env,
+                    timeout=YTDLP_TOTAL_TIMEOUT_SECONDS,
+                )
+                if result.returncode == 0:
+                    try:
+                        return json.loads(result.stdout), None
+                    except json.JSONDecodeError as exc:
+                        detail = "yt-dlp 没有返回有效数据：{}".format(exc)
+                else:
+                    detail = result.stderr or result.stdout or "yt-dlp 错误码 {}".format(result.returncode)
+            except FileNotFoundError:
+                raise SystemExit("找不到 yt-dlp。请重新安装完整版本，或在命令行环境中安装 yt-dlp。")
+            except subprocess.TimeoutExpired:
+                detail = "request timed out after {} seconds".format(YTDLP_TOTAL_TIMEOUT_SECONDS)
+            code, message, retryable, safe_detail = classify_request_error(detail)
+            last_error = ArchiveRequestError(code, message, safe_detail[-600:], retryable)
+            if not retryable or code == "rate_limited" or attempt >= command_attempts:
+                break
+            wait_seconds = min(4, attempt * 2)
+            emit_event(
+                "network_retry",
+                "{} 正在进行第 {}/{} 次重试……".format(message, attempt + 1, command_attempts),
+                level="warning",
+                error_type=code,
+                attempt=attempt + 1,
+                attempts=command_attempts,
+                wait_seconds=wait_seconds,
             )
-            if result.returncode == 0:
-                try:
-                    return json.loads(result.stdout)
-                except json.JSONDecodeError as exc:
-                    detail = "yt-dlp 没有返回有效数据：{}".format(exc)
-            else:
-                detail = result.stderr or result.stdout or "yt-dlp 错误码 {}".format(result.returncode)
-        except FileNotFoundError:
-            raise SystemExit("找不到 yt-dlp。请重新安装完整版本，或在命令行环境中安装 yt-dlp。")
-        except subprocess.TimeoutExpired:
-            detail = "request timed out after {} seconds".format(YTDLP_TOTAL_TIMEOUT_SECONDS)
-        code, message, retryable, safe_detail = classify_request_error(detail)
-        last_error = ArchiveRequestError(code, message, safe_detail[-600:], retryable)
-        if not retryable or code == "rate_limited" or attempt >= attempts:
-            break
-        wait_seconds = min(4, attempt * 2)
+            time.sleep(wait_seconds)
+        return None, last_error
+
+    payload, last_error = execute(args, attempts)
+    if payload is not None:
+        return payload
+
+    # YouTube increasingly challenges the normal web client on some Windows/IP
+    # combinations. These public player clients can still expose public metadata
+    # and captions without using browser cookies or a user's signed-in session.
+    if (
+        last_error
+        and last_error.code == "verification_required"
+        and "--extractor-args" not in args
+    ):
         emit_event(
-            "network_retry",
-            "{} 正在进行第 {}/{} 次重试……".format(message, attempt + 1, attempts),
+            "youtube_client_fallback",
+            "YouTube 暂时拒绝默认访问方式，正在切换公开客户端重新读取字幕……",
             level="warning",
-            error_type=code,
-            attempt=attempt + 1,
-            attempts=attempts,
-            wait_seconds=wait_seconds,
         )
-        time.sleep(wait_seconds)
+        fallback_args = [
+            "--extractor-args",
+            "youtube:player_client=android_vr,web_embedded,tv_simply",
+            *args,
+        ]
+        payload, fallback_error = execute(fallback_args, 1)
+        if payload is not None:
+            emit_event("youtube_client_recovered", "已切换公开客户端并恢复读取。")
+            return payload
+        last_error = fallback_error or last_error
+
     raise last_error
 
 

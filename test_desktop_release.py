@@ -33,6 +33,11 @@ class DesktopReleaseTests(unittest.TestCase):
         self.assertIn("def save_ai_key(self):", source)
         self.assertIn('f"youtube-caption-channel-{os.getpid()}.txt"', source)
         self.assertIn("def remove_channel_file(self):", source)
+        self.assertIn("def enable_windows_dpi_awareness()", source)
+        self.assertIn("def metric_card(self, parent, icon, label, value, accent)", source)
+        start_block = source[source.index("    def start(self):"):source.index("    def read_output(self):")]
+        self.assertNotIn('"--open-after"', start_block)
+        self.assertIn("if code == 0:\n            self.open_results()", source)
 
     def test_release_versions_stay_in_sync(self):
         with (ROOT / "macos" / "Info.plist").open("rb") as handle:
